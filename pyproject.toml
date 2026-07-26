@@ -16,10 +16,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "fastapi>=0.115",
     "httpx>=0.28.1",
     "pydantic>=2",
     "pydantic-settings>=2",
     "typer>=0.12",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.urls]

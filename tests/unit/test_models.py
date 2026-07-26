@@ -151,9 +151,32 @@ def test_job_state_happy_path() -> None:
     assert state.stage is None
     assert state.chapters == []
     assert state.progress == []
+    assert state.artifacts is None
     assert state.error is None
     assert state.created_at.tzinfo is not None
     assert state.updated_at.tzinfo is not None
+
+
+def test_job_state_with_artifacts() -> None:
+    opts = BuildOptions(source="/books/sample")
+    manifest = ArtifactManifest(
+        chapter_audio=[Path("audio/0001.wav")],
+        m4b_path=Path("out/book.m4b"),
+    )
+    state = JobState(
+        job_id="with-art",
+        source="/books/sample",
+        options=opts,
+        status=JobStatus.COMPLETED,
+        stage=JobStage.PACKAGE,
+        artifacts=manifest,
+    )
+    assert state.artifacts is not None
+    assert state.artifacts.m4b_path == Path("out/book.m4b")
+    raw = state.model_dump_json()
+    restored = JobState.model_validate_json(raw)
+    assert restored.artifacts is not None
+    assert restored.artifacts.m4b_path == Path("out/book.m4b")
 
 
 def test_job_state_empty_job_id_rejected() -> None:

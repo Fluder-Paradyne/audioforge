@@ -30,6 +30,14 @@ Issues = "https://github.com/Fluder-Paradyne/audioforge/issues"
 [project.scripts]
 audioforge = "audioforge.cli:app"
 
+[project.optional-dependencies]
+# Optional TTS stack (not required for CI / FakeTtsBackend). Install with:
+#   uv sync --extra tts
+# Concrete package pins may need adjusting for your platform (Apple Silicon).
+tts = [
+    "kokoro>=0.9",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.27",

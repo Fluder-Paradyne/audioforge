@@ -12,7 +12,7 @@ from audioforge.backends.fictionreaper import FakeFictionReaperRunner
 from audioforge.backends.rules_prep import RulesTextPrep
 from audioforge.io.paths import JobPaths
 from audioforge.jobstore import load_job
-from audioforge.models import BuildOptions, JobStage, JobStatus
+from audioforge.models import BuildOptions, JobStage, JobState, JobStatus
 from audioforge.pipeline.orchestrator import (
     PipelineError,
     _book_slug,
@@ -316,3 +316,195 @@ def test_slugify_and_id_helpers() -> None:
     blank_opts = BuildOptions(source="/books/x", job_id="  ")
     derived = _resolve_job_id(blank_opts, None)
     assert derived.startswith("x-") or len(derived) == 8
+
+
+# --- stage helpers / resolve_job_paths ---
+
+
+def test_run_prepare_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    options = BuildOptions(
+        source=str(FIXTURES),
+        job_id="prep-only",
+        skip_prep=True,
+    )
+    from audioforge.pipeline.orchestrator import run_prepare
+
+    state = run_prepare(
+        options,
+        settings,
+        prep=RulesTextPrep(),
+        fictionreaper=None,
+    )
+    assert state.status == JobStatus.COMPLETED
+    assert state.stage == JobStage.PREP
+    assert len(state.chapters) == 2
+    assert all(p.prep_done for p in state.progress)
+    # No package artifacts
+    assert state.artifacts is None
+    paths = JobPaths.for_job(settings.work_dir, "prep-only")
+    assert paths.prepared.is_dir()
+    prepared_files = list(paths.prepared.glob("*.txt"))
+    assert len(prepared_files) == 2
+
+
+def test_run_prepare_fail(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    options = BuildOptions(source=str(FIXTURES), job_id="prep-fail", resume=False)
+    from audioforge.pipeline.orchestrator import run_prepare
+
+    with pytest.raises(PipelineError, match="prep deliberately broken"):
+        run_prepare(options, settings, prep=BrokenPrep())
+
+
+def test_run_synthesize_and_package_from_prepare(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    job_id = "stages"
+    options = BuildOptions(
+        source=str(FIXTURES),
+        job_id=job_id,
+        skip_prep=True,
+    )
+    from audioforge.pipeline.orchestrator import (
+        run_package,
+        run_prepare,
+        run_synthesize,
+    )
+
+    prepared = run_prepare(options, settings, prep=RulesTextPrep())
+    assert prepared.status == JobStatus.COMPLETED
+
+    synth = run_synthesize(
+        settings,
+        job_or_path=job_id,
+        tts=FakeTtsBackend(),
+    )
+    assert synth.status == JobStatus.COMPLETED
+    assert synth.stage == JobStage.TTS
+    assert all(p.audio_done for p in synth.progress)
+
+    packaged = run_package(
+        settings,
+        job_or_path=job_id,
+        ffmpeg=FakeFfmpegRunner(),
+    )
+    assert packaged.status == JobStatus.COMPLETED
+    assert packaged.stage == JobStage.PACKAGE
+    assert packaged.artifacts is not None
+    assert packaged.artifacts.m4b_path is not None
+    assert packaged.artifacts.m4b_path.is_file()
+
+
+def test_run_synthesize_no_chapters(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    job_id = "empty"
+    paths = JobPaths.for_job(settings.work_dir, job_id).ensure()
+    from audioforge.jobstore import save_job
+    from audioforge.pipeline.orchestrator import run_synthesize
+
+    empty = JobState(
+        job_id=job_id,
+        source="/x",
+        options=BuildOptions(source="/x"),
+        status=JobStatus.PENDING,
+    )
+    save_job(empty, paths.job_json)
+    with pytest.raises(PipelineError, match="no chapters"):
+        run_synthesize(settings, job_or_path=job_id, tts=FakeTtsBackend())
+
+
+def test_run_package_no_chapters(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    job_id = "empty-pkg"
+    paths = JobPaths.for_job(settings.work_dir, job_id).ensure()
+    from audioforge.jobstore import save_job
+    from audioforge.pipeline.orchestrator import run_package
+
+    empty = JobState(
+        job_id=job_id,
+        source="/x",
+        options=BuildOptions(source="/x"),
+        status=JobStatus.PENDING,
+    )
+    save_job(empty, paths.job_json)
+    with pytest.raises(PipelineError, match="no chapters"):
+        run_package(settings, job_or_path=job_id, ffmpeg=FakeFfmpegRunner())
+
+
+def test_run_package_failure(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    options = BuildOptions(
+        source=str(FIXTURES),
+        job_id="pkg-fail",
+        skip_prep=True,
+    )
+    from audioforge.pipeline.orchestrator import (
+        run_package,
+        run_prepare,
+        run_synthesize,
+    )
+
+    run_prepare(options, settings, prep=RulesTextPrep())
+    run_synthesize(settings, job_or_path="pkg-fail", tts=FakeTtsBackend())
+
+    class BrokenFfmpeg:
+        def run(self, cmd: list[str]) -> None:
+            del cmd
+            raise RuntimeError("ffmpeg exploded")
+
+    with pytest.raises(PipelineError, match="ffmpeg exploded") as exc_info:
+        run_package(settings, job_or_path="pkg-fail", ffmpeg=BrokenFfmpeg())
+    assert exc_info.value.state.status == JobStatus.FAILED
+    assert exc_info.value.state.stage == JobStage.PACKAGE
+
+
+def test_run_synthesize_tts_failure(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    options = BuildOptions(
+        source=str(FIXTURES),
+        job_id="tts-fail",
+        skip_prep=True,
+    )
+    from audioforge.pipeline.orchestrator import run_prepare, run_synthesize
+
+    run_prepare(options, settings, prep=RulesTextPrep())
+
+    class BrokenTts:
+        def synthesize(self, text: str, *, voice: str, out_path: Path) -> Path:
+            del text, voice, out_path
+            raise RuntimeError("tts broke")
+
+    with pytest.raises(PipelineError, match="tts broke"):
+        run_synthesize(settings, job_or_path="tts-fail", tts=BrokenTts())
+
+
+def test_resolve_job_paths_variants(tmp_path: Path) -> None:
+    from audioforge.jobstore import save_job
+    from audioforge.pipeline.orchestrator import resolve_job_paths
+
+    work = tmp_path / "work"
+    paths = JobPaths.for_job(work, "rid").ensure()
+    state = JobState(
+        job_id="rid",
+        source="/x",
+        options=BuildOptions(source="/x"),
+        status=JobStatus.PENDING,
+    )
+    save_job(state, paths.job_json)
+
+    by_id = resolve_job_paths("rid", work)
+    assert by_id.job_json == paths.job_json
+
+    by_dir = resolve_job_paths(str(paths.root), work)
+    assert by_dir.job_json == paths.job_json
+
+    by_file = resolve_job_paths(str(paths.job_json), work)
+    assert by_file.job_json == paths.job_json.resolve()
+
+    with pytest.raises(FileNotFoundError):
+        resolve_job_paths("missing-id", work)
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError):
+        resolve_job_paths(str(empty_dir), work)

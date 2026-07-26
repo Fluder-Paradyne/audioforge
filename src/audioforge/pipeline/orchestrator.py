@@ -101,12 +101,7 @@ def run_pipeline(
     """
     resolved_id = _resolve_job_id(options, job_id)
     paths = JobPaths.for_job(settings.work_dir, resolved_id).ensure()
-    state = _load_or_create_state(paths, resolved_id, options)
-    state.status = JobStatus.RUNNING
-    state.error = None
-    state.options = options
-    state.source = options.source
-    _touch_and_save(state, paths)
+    state = _begin_job(paths, resolved_id, options)
 
     try:
         # --- ingest ---
@@ -157,15 +152,205 @@ def run_pipeline(
             book_slug=_book_slug(resolved_id, options.source),
         )
         state.artifacts = manifest
-        state.status = JobStatus.COMPLETED
-        state.error = None
-        _touch_and_save(state, paths)
-        return state
+        return _complete_job(state, paths)
     except Exception as exc:
-        state.status = JobStatus.FAILED
-        state.error = str(exc)
+        raise _fail_job(state, paths, exc) from exc
+
+
+def run_prepare(
+    options: BuildOptions,
+    settings: AppSettings,
+    *,
+    prep: TextPrepBackend,
+    fictionreaper: FictionReaperRunner | None = None,
+    job_id: str | None = None,
+) -> JobState:
+    """Run ingest → prep only, persisting :class:`JobState`.
+
+    On success ``status=completed`` and ``stage=prep``. Raises
+    :class:`PipelineError` after persisting failure (same policy as
+    :func:`run_pipeline`).
+    """
+    resolved_id = _resolve_job_id(options, job_id)
+    paths = JobPaths.for_job(settings.work_dir, resolved_id).ensure()
+    state = _begin_job(paths, resolved_id, options)
+
+    try:
+        state.stage = JobStage.INGEST
         _touch_and_save(state, paths)
-        raise PipelineError(str(exc), state=state) from exc
+        chapters = ingest(
+            source=options.source,
+            paths=paths,
+            options=options,
+            runner=fictionreaper,
+        )
+        state.chapters = chapters
+        state.progress = _merge_progress(state.progress, chapters)
+        _touch_and_save(state, paths)
+
+        state.stage = JobStage.PREP
+        _touch_and_save(state, paths)
+        state.progress = prep_chapters(
+            chapters=chapters,
+            paths=paths,
+            options=options,
+            backend=prep,
+            progress=state.progress,
+        )
+        return _complete_job(state, paths)
+    except Exception as exc:
+        raise _fail_job(state, paths, exc) from exc
+
+
+def run_synthesize(
+    settings: AppSettings,
+    *,
+    job_or_path: str,
+    tts: TtsBackend,
+) -> JobState:
+    """Run TTS for an existing job (job id under work dir or job folder path).
+
+    Requires ``job.json`` with chapters (run prepare first). On success
+    ``status=completed`` and ``stage=tts``.
+    """
+    paths = resolve_job_paths(job_or_path, settings.work_dir)
+    state = load_job(paths.job_json)
+    if not state.chapters:
+        state.status = JobStatus.FAILED
+        state.error = "Job has no chapters; run prepare first"
+        state.stage = JobStage.TTS
+        _touch_and_save(state, paths)
+        raise PipelineError(state.error, state=state)
+
+    options = state.options
+    state.status = JobStatus.RUNNING
+    state.error = None
+    _touch_and_save(state, paths)
+
+    try:
+        state.stage = JobStage.TTS
+        _touch_and_save(state, paths)
+        state.progress = synthesize_chapters(
+            chapters=state.chapters,
+            paths=paths,
+            options=options,
+            backend=tts,
+            progress=state.progress,
+        )
+        return _complete_job(state, paths)
+    except Exception as exc:
+        raise _fail_job(state, paths, exc) from exc
+
+
+def run_package(
+    settings: AppSettings,
+    *,
+    job_or_path: str,
+    ffmpeg: FfmpegRunner,
+) -> JobState:
+    """Package chapter audio into M4B for an existing job.
+
+    Requires ``job.json`` with chapters. On success ``status=completed``,
+    ``stage=package``, and ``artifacts`` set.
+    """
+    paths = resolve_job_paths(job_or_path, settings.work_dir)
+    state = load_job(paths.job_json)
+    if not state.chapters:
+        state.status = JobStatus.FAILED
+        state.error = "Job has no chapters; run prepare first"
+        state.stage = JobStage.PACKAGE
+        _touch_and_save(state, paths)
+        raise PipelineError(state.error, state=state)
+
+    state.status = JobStatus.RUNNING
+    state.error = None
+    _touch_and_save(state, paths)
+
+    try:
+        state.stage = JobStage.PACKAGE
+        _touch_and_save(state, paths)
+        manifest = package_book(
+            chapters=state.chapters,
+            paths=paths,
+            ffmpeg=ffmpeg,
+            book_slug=_book_slug(state.job_id, state.source),
+        )
+        state.artifacts = manifest
+        return _complete_job(state, paths)
+    except Exception as exc:
+        raise _fail_job(state, paths, exc) from exc
+
+
+def resolve_job_paths(job_or_path: str, work_dir: Path) -> JobPaths:
+    """Resolve a job id or filesystem path to :class:`JobPaths`.
+
+    Accepts:
+
+    * Absolute/relative path to a job directory (containing ``job.json``)
+    * Path to a ``job.json`` file
+    * Job id string under *work_dir*
+
+    Raises:
+        FileNotFoundError: If no ``job.json`` can be found.
+    """
+    expanded = Path(job_or_path).expanduser()
+    if expanded.exists():
+        if expanded.is_file():
+            root = expanded.parent.resolve()
+            job_json = expanded.resolve()
+        else:
+            root = expanded.resolve()
+            job_json = root / "job.json"
+        paths = JobPaths(
+            root=root,
+            source=root / "source",
+            prepared=root / "prepared",
+            audio=root / "audio",
+            out=root / "out",
+            job_json=job_json,
+        )
+        if not paths.job_json.is_file():
+            raise FileNotFoundError(f"No job.json found at {paths.job_json}")
+        return paths
+
+    paths = JobPaths.for_job(work_dir, job_or_path)
+    if not paths.job_json.is_file():
+        raise FileNotFoundError(
+            f"No job found for {job_or_path!r} (looked for {paths.job_json})"
+        )
+    return paths
+
+
+def _begin_job(
+    paths: JobPaths,
+    job_id: str,
+    options: BuildOptions,
+) -> JobState:
+    state = _load_or_create_state(paths, job_id, options)
+    state.status = JobStatus.RUNNING
+    state.error = None
+    state.options = options
+    state.source = options.source
+    _touch_and_save(state, paths)
+    return state
+
+
+def _complete_job(state: JobState, paths: JobPaths) -> JobState:
+    state.status = JobStatus.COMPLETED
+    state.error = None
+    _touch_and_save(state, paths)
+    return state
+
+
+def _fail_job(
+    state: JobState,
+    paths: JobPaths,
+    exc: BaseException,
+) -> PipelineError:
+    state.status = JobStatus.FAILED
+    state.error = str(exc)
+    _touch_and_save(state, paths)
+    return PipelineError(str(exc), state=state)
 
 
 def _resolve_job_id(options: BuildOptions, job_id: str | None) -> str:

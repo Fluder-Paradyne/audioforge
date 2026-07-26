@@ -1,0 +1,92 @@
+[project]
+name = "audioforge"
+version = "0.1.0"
+description = "Local pipeline: FictionReaper Markdown to single-voice audiobooks"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Fluder-Paradyne" }]
+keywords = ["audiobook", "tts", "fictionreaper", "kokoro", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/Fluder-Paradyne/audioforge"
+Repository = "https://github.com/Fluder-Paradyne/audioforge"
+Issues = "https://github.com/Fluder-Paradyne/audioforge/issues"
+
+[project.scripts]
+audioforge = "audioforge.cli:app"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audioforge"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["audioforge"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+pretty = true
+show_error_codes = true
+mypy_path = "src"
+packages = ["audioforge"]
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+]
+
+[tool.coverage.run]
+source = ["audioforge"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false

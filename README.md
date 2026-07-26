@@ -13,7 +13,7 @@ AudioForge turns FictionReaper-style chapter Markdown (or a fiction URL via Fict
 
 CLI and a small local FastAPI surface share the same disk-backed job pipeline (`work/<job-id>/`).
 
-> **Status:** v0.1.0 (alpha). Pipeline stages and CLI are in place; the jobs HTTP API is still expanding beyond `/health`.
+> **Status:** v0.1.0 (alpha). Single-voice pipeline, CLI, and local jobs API are in place. Multi-voice is future work.
 
 ## Features (v1)
 
@@ -24,7 +24,7 @@ CLI and a small local FastAPI surface share the same disk-backed job pipeline (`
 - Chapter audio + chaptered M4B packaging (FFmpeg)
 - Resume-friendly on-disk jobs (`job.json`, `--resume` / `--force`)
 - CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `serve`
-- Local API stub (`GET /health`; full `/jobs` API planned)
+- Local FastAPI: `POST /jobs`, job status, artifacts, `/health`
 - 100% test coverage gate, `mypy --strict`, Ruff
 
 ## Requirements
@@ -183,10 +183,10 @@ curl -s http://127.0.0.1:8765/health
 
 | Method | Path | Status |
 |--------|------|--------|
-| `GET` | `/health` | Implemented — liveness `{"status":"ok"}` |
-| `POST` | `/jobs` | Planned — create job, start pipeline (202 + `job_id`) |
-| `GET` | `/jobs/{job_id}` | Planned — status / progress |
-| `GET` | `/jobs/{job_id}/artifacts` | Planned — artifact paths when ready |
+| `GET` | `/health` | Liveness + config flags (`ffmpeg_configured`, `ollama_base_url`) |
+| `POST` | `/jobs` | Create job, start pipeline (202 + `job_id` / status) |
+| `GET` | `/jobs/{job_id}` | Full job state from `job.json` |
+| `GET` | `/jobs/{job_id}/artifacts` | Chapter audio + M4B paths when ready |
 
 Disk `job.json` remains the source of truth for job state. See the [design spec](docs/superpowers/specs/2026-07-26-audioforge-design.md) for the full contract.
 

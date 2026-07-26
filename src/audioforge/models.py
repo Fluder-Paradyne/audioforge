@@ -71,6 +71,15 @@ class ChapterProgress(BaseModel):
     error: str | None = None
 
 
+class ArtifactManifest(BaseModel):
+    """Paths to produced audio artifacts for a job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_audio: list[Path]
+    m4b_path: Path | None = None
+
+
 class JobState(BaseModel):
     """Authoritative on-disk job state (``job.json``)."""
 
@@ -83,15 +92,7 @@ class JobState(BaseModel):
     stage: JobStage | None = None
     chapters: list[ChapterRef] = Field(default_factory=list)
     progress: list[ChapterProgress] = Field(default_factory=list)
+    artifacts: ArtifactManifest | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
-
-
-class ArtifactManifest(BaseModel):
-    """Paths to produced audio artifacts for a job."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    chapter_audio: list[Path]
-    m4b_path: Path | None = None

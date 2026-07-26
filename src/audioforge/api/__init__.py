@@ -1,4 +1,4 @@
-"""HTTP API package (minimal stub; full jobs API in a later issue)."""
+"""HTTP API package (FastAPI jobs + health)."""
 
 from __future__ import annotations
 

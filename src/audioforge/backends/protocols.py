@@ -30,3 +30,15 @@ class TtsBackend(Protocol):
     def synthesize(self, text: str, *, voice: str, out_path: Path) -> Path:
         """Write audio for *text* to *out_path* and return that path."""
         ...
+
+
+class FfmpegRunner(Protocol):
+    """Run an FFmpeg command (or a test double)."""
+
+    def run(self, args: list[str]) -> None:
+        """Execute FFmpeg with *args* (excluding the binary name).
+
+        Implementations prepend their configured ``ffmpeg`` path. Raise on
+        non-zero exit or missing binary.
+        """
+        ...

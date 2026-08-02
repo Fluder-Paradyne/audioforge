@@ -10,11 +10,14 @@ import pytest
 from audioforge.backends.alignment import (
     AlignmentError,
     FakeAlignmentBackend,
+    ProportionalAlignmentBackend,
     alignment_filename,
+    detect_speech_regions,
     load_chapter_alignment,
     proportional_cues,
     save_chapter_alignment,
     split_phrases,
+    strip_text_for_alignment,
     wav_duration_seconds,
 )
 from audioforge.backends.ffmpeg import FakeFfmpegRunner
@@ -499,3 +502,190 @@ def test_api_fills_aligner_when_other_backends_injected(tmp_path: Path) -> None:
     )
     assert response.status_code == 202
     assert response.json()["status"] == "completed"
+
+
+def test_strip_text_for_alignment_drops_frontmatter() -> None:
+    raw = """---
+title: "1. Good Morning Brother"
+fiction: "Mother of Learning"
+---
+
+# 1. Good Morning Brother
+
+**Chapter 001**
+
+Zorian woke up. He glared.
+"""
+    cleaned = strip_text_for_alignment(raw)
+    assert "---" not in cleaned
+    assert "fiction:" not in cleaned
+    assert "Zorian woke up" in cleaned
+    assert "**" not in cleaned
+
+
+def test_proportional_with_speech_regions() -> None:
+    # Two speech regions with a gap of silence in the middle
+    text = "Hello world. Second sentence here."
+    cues = proportional_cues(
+        text,
+        10.0,
+        speech_regions=[(0.0, 3.0), (7.0, 10.0)],
+    )
+    assert cues[0].start_s == 0.0
+    assert cues[0].end_s <= 3.0 + 0.05
+    # Later cues should land in second region (after silence gap)
+    assert cues[-1].end_s >= 7.0
+    assert cues[-1].end_s <= 10.0 + 0.05
+
+
+def test_detect_speech_regions_fallback_no_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=1.0)
+
+    def boom(*a: object, **k: object) -> object:
+        raise FileNotFoundError("no ffmpeg")
+
+    monkeypatch.setattr("audioforge.backends.alignment.subprocess.run", boom)
+    regions = detect_speech_regions(wav, duration_s=1.0)
+    assert regions == [(0.0, 1.0)]
+
+
+def test_detect_speech_regions_parses_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=10.0)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = """
+[silencedetect @ 0x] silence_start: 2.0
+[silencedetect @ 0x] silence_end: 3.5 | silence_duration: 1.5
+[silencedetect @ 0x] silence_start: 8.0
+[silencedetect @ 0x] silence_end: 10.0 | silence_duration: 2.0
+"""
+
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.subprocess.run",
+        lambda *a, **k: Result(),
+    )
+    regions = detect_speech_regions(wav, duration_s=10.0)
+    assert regions[0] == (0.0, 2.0)
+    assert regions[1][0] == 3.5
+    assert regions[1][1] == 8.0
+
+
+def test_detect_speech_regions_no_silence_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=2.0)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "no silence here"
+
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.subprocess.run",
+        lambda *a, **k: Result(),
+    )
+    assert detect_speech_regions(wav, duration_s=2.0) == [(0.0, 2.0)]
+
+
+def test_proportional_empty_speech_regions_fallback() -> None:
+    cues = proportional_cues("Hi there.", 2.0, speech_regions=[(1.0, 1.01)])
+    # tiny region filtered → fallback full span
+    assert cues[0].start_s == 0.0
+    assert cues[-1].end_s == 2.0
+
+
+def test_proportional_backend_uses_silence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=5.0)
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.detect_speech_regions",
+        lambda *a, **k: [(0.0, 2.0), (3.0, 5.0)],
+    )
+    backend = ProportionalAlignmentBackend(use_silence=True)
+    text = """---
+title: x
+---
+
+Hello world. Second line.
+"""
+    cues = backend.align(wav, text, options=BuildOptions(source="."))
+    assert all("---" not in c.text for c in cues)
+    assert cues[0].start_s == 0.0
+
+
+def test_detect_trailing_open_silence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=5.0)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "silence_start: 4.0\n"  # no silence_end
+
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.subprocess.run",
+        lambda *a, **k: Result(),
+    )
+    regions = detect_speech_regions(wav, duration_s=5.0)
+    assert regions == [(0.0, 4.0)]
+
+
+def test_detect_all_silence_returns_full(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=5.0)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "silence_start: 0.0\nsilence_end: 5.0\n"
+
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.subprocess.run",
+        lambda *a, **k: Result(),
+    )
+    regions = detect_speech_regions(wav, duration_s=5.0)
+    # no speech gaps > 0.05 → fallback full
+    assert regions == [(0.0, 5.0)]
+
+
+def test_speech_time_to_absolute_past_end() -> None:
+    from audioforge.backends.alignment import _speech_time_to_absolute
+
+    regions = [(0.0, 1.0), (2.0, 3.0)]
+    lens = [1.0, 1.0]
+    assert _speech_time_to_absolute(10.0, regions, lens) == 3.0
+
+
+def test_detect_speech_with_trailing_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Silence in the middle leaves speech at the end (covers trailing append)."""
+    wav = tmp_path / "a.wav"
+    _write_silent_wav(wav, seconds=10.0)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "silence_start: 2.0\nsilence_end: 3.0\n"
+
+    monkeypatch.setattr(
+        "audioforge.backends.alignment.subprocess.run",
+        lambda *a, **k: Result(),
+    )
+    regions = detect_speech_regions(wav, duration_s=10.0)
+    assert regions == [(0.0, 2.0), (3.0, 10.0)]

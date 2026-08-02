@@ -14,6 +14,7 @@ class JobPaths:
     source: Path
     prepared: Path
     audio: Path
+    aligned: Path
     out: Path
     job_json: Path
     job_log: Path
@@ -27,6 +28,7 @@ class JobPaths:
             source=root / "source",
             prepared=root / "prepared",
             audio=root / "audio",
+            aligned=root / "aligned",
             out=root / "out",
             job_json=root / "job.json",
             job_log=root / "job.log",
@@ -34,6 +36,13 @@ class JobPaths:
 
     def ensure(self) -> JobPaths:
         """Create workspace directories (not ``job.json``) and return self."""
-        for directory in (self.root, self.source, self.prepared, self.audio, self.out):
+        for directory in (
+            self.root,
+            self.source,
+            self.prepared,
+            self.audio,
+            self.aligned,
+            self.out,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         return self

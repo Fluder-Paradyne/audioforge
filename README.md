@@ -9,7 +9,8 @@ AudioForge turns FictionReaper-style chapter Markdown (or a fiction URL via Fict
 1. **Ingest** — chapter folder, or optional FictionReaper download for a URL  
 2. **Prep** — light text cleanup for speech (Ollama when available; rule-based fallback)  
 3. **TTS** — single-voice synthesis via Kokoro  
-4. **Package** — per-chapter audio + one chaptered **M4B** via FFmpeg  
+4. **Align** — phrase-timed cues from prepared text + chapter WAV (for embedded subtitles)  
+5. **Package** — per-chapter audio + chaptered **M4B** (AAC + chapter markers + optional `mov_text` subtitles) via FFmpeg  
 
 CLI and a small local FastAPI surface share the same disk-backed job pipeline (`work/<job-id>/`).
 
@@ -21,7 +22,7 @@ CLI and a small local FastAPI surface share the same disk-backed job pipeline (`
 - Optional FictionReaper wrap when `source` is a URL
 - Text prep: Ollama (default model `llama3.2:3b`) with rules fallback / `--skip-prep`
 - Single-voice TTS via optional Kokoro extra (`af_heart` default voice)
-- Chapter audio + chaptered M4B packaging (FFmpeg)
+- Chapter audio + chaptered M4B packaging (FFmpeg), with optional embedded `mov_text` subtitles
 - Resume-friendly on-disk jobs (`job.json`, `--resume` / `--force`)
 - CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `doctor`, `serve`
 - Local FastAPI: `POST /jobs`, job status, artifacts, `/health`
@@ -175,6 +176,8 @@ curl -s http://127.0.0.1:8765/health
 | `--skip-prep` | Skip LLM/rules text prep | off |
 | `--resume` / `--no-resume` | Skip work already on disk | resume |
 | `--force` / `--no-force` | Re-run stages even if artifacts exist | no-force |
+| `--subtitles` / `--no-subtitles` | Align text to audio and mux `mov_text` into the M4B | on |
+| `--skip-align` | Skip alignment; package without a subtitle track | off |
 | `--fictionreaper-bin STR` | Path to FictionReaper binary | `fictionreaper` |
 | `--job-id STR` | Explicit job id under the work directory | auto |
 
@@ -246,7 +249,8 @@ work/<job-id>/
   source/           # FictionReaper-style chapter .md
   prepared/         # cleaned text per chapter
   audio/            # per-chapter audio
-  out/              # final .m4b
+  aligned/          # per-chapter timed cues (JSON)
+  out/              # final .m4b (+ subtitles.vtt when enabled)
   job.json          # JobState (source of truth)
   job.log           # Structured pipeline log for this job
 ```

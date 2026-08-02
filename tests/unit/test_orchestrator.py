@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from audioforge.backends.alignment import FakeAlignmentBackend
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import FakeFfmpegRunner
 from audioforge.backends.fictionreaper import FakeFictionReaperRunner
@@ -81,6 +82,7 @@ def test_run_pipeline_e2e_completed(tmp_path: Path) -> None:
         tts=tts,
         ffmpeg=ffmpeg,
         fictionreaper=None,
+        aligner=FakeAlignmentBackend(),
     )
 
     assert state.status == JobStatus.COMPLETED
@@ -127,6 +129,7 @@ def test_run_pipeline_e2e_with_url_and_fake_fictionreaper(tmp_path: Path) -> Non
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
         fictionreaper=FakeFictionReaperRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     assert state.status == JobStatus.COMPLETED
     assert len(state.chapters) == 2
@@ -151,6 +154,7 @@ def test_run_pipeline_fail_fast_broken_prep(tmp_path: Path) -> None:
             prep=BrokenPrep(),
             tts=FakeTtsBackend(),
             ffmpeg=ffmpeg,
+            aligner=FakeAlignmentBackend(),
         )
 
     err = exc_info.value
@@ -195,6 +199,7 @@ def test_run_pipeline_resume_skips_existing_work(tmp_path: Path) -> None:
         tts=tts,
         ffmpeg=ffmpeg,
         job_id=job_id,
+        aligner=FakeAlignmentBackend(),
     )
     assert first.status == JobStatus.COMPLETED
     assert prep.calls == 2
@@ -212,6 +217,7 @@ def test_run_pipeline_resume_skips_existing_work(tmp_path: Path) -> None:
         tts=tts2,
         ffmpeg=ffmpeg2,
         job_id=job_id,
+        aligner=FakeAlignmentBackend(),
     )
     assert second.status == JobStatus.COMPLETED
     # Resume: prepared + audio already on disk → no re-prep / re-synth
@@ -234,6 +240,7 @@ def test_run_pipeline_job_id_from_argument(tmp_path: Path) -> None:
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
         job_id="from-arg",
+        aligner=FakeAlignmentBackend(),
     )
     assert state.job_id == "from-arg"
 
@@ -247,6 +254,7 @@ def test_run_pipeline_derives_job_id_from_source_slug(tmp_path: Path) -> None:
         prep=RulesTextPrep(),
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     assert state.status == JobStatus.COMPLETED
     # sample_book slug prefix + short hex (underscores kept)
@@ -264,6 +272,7 @@ def test_run_pipeline_derives_short_id_for_url(tmp_path: Path) -> None:
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
         fictionreaper=FakeFictionReaperRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     assert state.status == JobStatus.COMPLETED
     # UUID hex short (8 chars) when source is a URL
@@ -281,6 +290,7 @@ def test_run_pipeline_reloads_existing_job_json(tmp_path: Path) -> None:
         prep=RulesTextPrep(),
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     created = first.created_at
     second = run_pipeline(
@@ -289,6 +299,7 @@ def test_run_pipeline_reloads_existing_job_json(tmp_path: Path) -> None:
         prep=RulesTextPrep(),
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     assert second.created_at == created
     assert second.status == JobStatus.COMPLETED
@@ -304,6 +315,7 @@ def test_run_pipeline_uses_options_job_id_when_arg_blank(tmp_path: Path) -> None
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
         job_id="   ",
+        aligner=FakeAlignmentBackend(),
     )
     assert state.job_id == "opts-id"
 
@@ -344,12 +356,7 @@ def test_run_prepare_only(tmp_path: Path) -> None:
     )
     from audioforge.pipeline.orchestrator import run_prepare
 
-    state = run_prepare(
-        options,
-        settings,
-        prep=RulesTextPrep(),
-        fictionreaper=None,
-    )
+    state = run_prepare(options, settings, prep=RulesTextPrep(), fictionreaper=None)
     assert state.status == JobStatus.COMPLETED
     assert state.stage == JobStage.PREP
     assert len(state.chapters) == 2
@@ -401,6 +408,7 @@ def test_run_synthesize_and_package_from_prepare(tmp_path: Path) -> None:
         settings,
         job_or_path=job_id,
         ffmpeg=FakeFfmpegRunner(),
+        aligner=FakeAlignmentBackend(),
     )
     assert packaged.status == JobStatus.COMPLETED
     assert packaged.stage == JobStage.PACKAGE
@@ -444,7 +452,12 @@ def test_run_package_no_chapters(tmp_path: Path) -> None:
     )
     save_job(empty, paths.job_json)
     with pytest.raises(PipelineError, match="no chapters"):
-        run_package(settings, job_or_path=job_id, ffmpeg=FakeFfmpegRunner())
+        run_package(
+            settings,
+            job_or_path=job_id,
+            ffmpeg=FakeFfmpegRunner(),
+            aligner=FakeAlignmentBackend(),
+        )
     assert paths.job_log.is_file()
     assert "package aborted" in paths.job_log.read_text(encoding="utf-8")
 
@@ -471,7 +484,12 @@ def test_run_package_failure(tmp_path: Path) -> None:
             raise RuntimeError("ffmpeg exploded")
 
     with pytest.raises(PipelineError, match="ffmpeg exploded") as exc_info:
-        run_package(settings, job_or_path="pkg-fail", ffmpeg=BrokenFfmpeg())
+        run_package(
+            settings,
+            job_or_path="pkg-fail",
+            ffmpeg=BrokenFfmpeg(),
+            aligner=FakeAlignmentBackend(),
+        )
     assert exc_info.value.state.status == JobStatus.FAILED
     assert exc_info.value.state.stage == JobStage.PACKAGE
 

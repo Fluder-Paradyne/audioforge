@@ -14,6 +14,7 @@ def test_for_job_layout(tmp_path: Path) -> None:
     assert paths.source == root / "source"
     assert paths.prepared == root / "prepared"
     assert paths.audio == root / "audio"
+    assert paths.aligned == root / "aligned"
     assert paths.out == root / "out"
     assert paths.job_json == root / "job.json"
     assert paths.job_log == root / "job.log"
@@ -28,6 +29,7 @@ def test_ensure_creates_directories(tmp_path: Path) -> None:
     assert paths.source.is_dir()
     assert paths.prepared.is_dir()
     assert paths.audio.is_dir()
+    assert paths.aligned.is_dir()
     assert paths.out.is_dir()
     # job.json is a file path; ensure should not create the file
     assert not paths.job_json.exists()

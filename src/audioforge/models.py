@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _utc_now() -> datetime:
@@ -30,6 +30,7 @@ class JobStage(StrEnum):
     INGEST = "ingest"
     PREP = "prep"
     TTS = "tts"
+    ALIGN = "align"
     PACKAGE = "package"
 
 
@@ -47,6 +48,8 @@ class BuildOptions(BaseModel):
     fictionreaper_bin: str = "fictionreaper"
     output_dir: Path | None = None
     job_id: str | None = None
+    subtitles: bool = True
+    skip_align: bool = False
 
 
 class ChapterRef(BaseModel):
@@ -68,7 +71,33 @@ class ChapterProgress(BaseModel):
     chapter_index: int = Field(ge=1)
     prep_done: bool = False
     audio_done: bool = False
+    align_done: bool = False
     error: str | None = None
+
+
+class TimedCue(BaseModel):
+    """One timed subtitle cue (times are relative to the chapter audio)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_s: float = Field(ge=0.0)
+    end_s: float = Field(gt=0.0)
+    text: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _end_after_start(self) -> TimedCue:
+        if self.end_s <= self.start_s:
+            raise ValueError("end_s must be greater than start_s")
+        return self
+
+
+class ChapterAlignment(BaseModel):
+    """Alignment result for one chapter (chapter-relative cue times)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_index: int = Field(ge=1)
+    cues: list[TimedCue] = Field(default_factory=list)
 
 
 class ArtifactManifest(BaseModel):
@@ -78,6 +107,7 @@ class ArtifactManifest(BaseModel):
 
     chapter_audio: list[Path]
     m4b_path: Path | None = None
+    subtitles_vtt: Path | None = None
 
 
 class JobState(BaseModel):

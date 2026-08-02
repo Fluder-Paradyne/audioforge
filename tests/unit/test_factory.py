@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from audioforge.backends.alignment import ProportionalAlignmentBackend
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import SubprocessFfmpegRunner
 from audioforge.backends.fictionreaper import SubprocessFictionReaperRunner
@@ -25,6 +26,17 @@ def test_create_default_backends_rules_when_skip_prep(
     assert isinstance(backends.tts, FakeTtsBackend)
     assert isinstance(backends.ffmpeg, SubprocessFfmpegRunner)
     assert isinstance(backends.fictionreaper, SubprocessFictionReaperRunner)
+    assert isinstance(backends.aligner, ProportionalAlignmentBackend)
+
+
+def test_create_default_backends_no_aligner_when_skip_align(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUDIOFORGE_ALLOW_FAKE_TTS", "1")
+    settings = AppSettings()
+    options = BuildOptions(source="/books", skip_prep=True, skip_align=True)
+    backends = create_default_backends(settings, options)
+    assert backends.aligner is None
 
 
 def test_create_default_backends_reraises_without_fake_env(

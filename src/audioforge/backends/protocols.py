@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from audioforge.models import BuildOptions
+from audioforge.models import BuildOptions, TimedCue
 
 
 class FictionReaperRunner(Protocol):
@@ -41,4 +41,18 @@ class FfmpegRunner(Protocol):
         Implementations prepend their configured ``ffmpeg`` path. Raise on
         non-zero exit or missing binary.
         """
+        ...
+
+
+class AlignmentBackend(Protocol):
+    """Force-align (or estimate) timed cues for chapter audio + text."""
+
+    def align(
+        self,
+        audio_path: Path,
+        text: str,
+        *,
+        options: BuildOptions,
+    ) -> list[TimedCue]:
+        """Return chapter-relative timed cues for *text* against *audio_path*."""
         ...

@@ -9,6 +9,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 
 from audioforge.api.schemas import CreateJobRequest, CreateJobResponse, HealthResponse
 from audioforge.backends.protocols import (
+    AlignmentBackend,
     FfmpegRunner,
     FictionReaperRunner,
     TextPrepBackend,
@@ -33,6 +34,7 @@ def create_app(
     tts: TtsBackend | None = None,
     ffmpeg: FfmpegRunner | None = None,
     fictionreaper: FictionReaperRunner | None = None,
+    aligner: AlignmentBackend | None = None,
 ) -> FastAPI:
     """Build the AudioForge ASGI app.
 
@@ -45,7 +47,7 @@ def create_app(
         When ``True``, ``POST /jobs`` runs the pipeline inline before returning
         (preferred for unit tests). When ``False`` (default), the pipeline runs
         in a FastAPI background task.
-    prep / tts / ffmpeg / fictionreaper:
+    prep / tts / ffmpeg / fictionreaper / aligner:
         Optional injectable backends. Any omitted backend is filled from
         :func:`~audioforge.factory.create_default_backends` at job start.
     """
@@ -72,15 +74,23 @@ def create_app(
         TtsBackend,
         FfmpegRunner,
         FictionReaperRunner | None,
+        AlignmentBackend | None,
     ]:
+        from audioforge.backends.alignment import ProportionalAlignmentBackend
+
+        want_subs = bool(options.subtitles) and not bool(options.skip_align)
         if prep is not None and tts is not None and ffmpeg is not None:
-            return prep, tts, ffmpeg, fictionreaper
+            al = aligner
+            if al is None and want_subs:
+                al = ProportionalAlignmentBackend()
+            return prep, tts, ffmpeg, fictionreaper, al
         defaults = create_default_backends(app_settings, options)
         return (
             prep if prep is not None else defaults.prep,
             tts if tts is not None else defaults.tts,
             ffmpeg if ffmpeg is not None else defaults.ffmpeg,
             fictionreaper if fictionreaper is not None else defaults.fictionreaper,
+            aligner if aligner is not None else defaults.aligner,
         )
 
     def _options_from_request(body: CreateJobRequest) -> BuildOptions:
@@ -96,10 +106,12 @@ def create_app(
             force=body.force,
             fictionreaper_bin=body.fictionreaper_bin,
             job_id=job_id,
+            subtitles=body.subtitles,
+            skip_align=body.skip_align,
         )
 
     def _execute_pipeline(options: BuildOptions) -> JobState:
-        p, t, f, fr = _resolve_backends(options)
+        p, t, f, fr, al = _resolve_backends(options)
         try:
             return run_pipeline(
                 options,
@@ -108,6 +120,7 @@ def create_app(
                 tts=t,
                 ffmpeg=f,
                 fictionreaper=fr,
+                aligner=al,
                 job_id=options.job_id,
             )
         except PipelineError as exc:

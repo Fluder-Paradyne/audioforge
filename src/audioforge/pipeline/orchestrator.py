@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from audioforge.backends.protocols import (
+    AlignmentBackend,
     FfmpegRunner,
     FictionReaperRunner,
     TextPrepBackend,
@@ -47,6 +48,7 @@ from audioforge.models import (
     JobState,
     JobStatus,
 )
+from audioforge.pipeline.align import align_chapters, load_alignments_for_chapters
 from audioforge.pipeline.ingest import ingest
 from audioforge.pipeline.package import package_book
 from audioforge.pipeline.prep import prep_chapters
@@ -78,14 +80,15 @@ def run_pipeline(
     tts: TtsBackend,
     ffmpeg: FfmpegRunner,
     fictionreaper: FictionReaperRunner | None = None,
+    aligner: AlignmentBackend | None = None,
     job_id: str | None = None,
 ) -> JobState:
-    """Run ingest → prep → tts → package, persisting :class:`JobState` at each stage.
+    """Run ingest → prep → tts → [align] → package, persisting job state.
 
     Parameters
     ----------
     options:
-        Per-build knobs (source, voice, resume/force, etc.).
+        Per-build knobs (source, voice, resume/force, subtitles, etc.).
     settings:
         App settings (workspace root under ``work_dir``).
     prep / tts / ffmpeg:
@@ -93,6 +96,9 @@ def run_pipeline(
         :func:`~audioforge.factory.create_default_backends`).
     fictionreaper:
         Required only when ``options.source`` is an ``http(s)`` URL.
+    aligner:
+        Required when subtitles are enabled (``subtitles`` and not
+        ``skip_align``).
     job_id:
         Explicit job id. Falls back to ``options.job_id``, then a derived id
         (source slug + short uuid, or short uuid alone).
@@ -108,6 +114,13 @@ def run_pipeline(
         After persisting ``status=failed`` and ``error`` on the job. The failed
         state is available as ``exc.state``.
     """
+    want_subs = _want_subtitles(options)
+    if want_subs and aligner is None:
+        raise ValueError(
+            "aligner backend is required when subtitles are enabled "
+            "(pass aligner= or set skip_align/subtitles=false)"
+        )
+
     resolved_id = _resolve_job_id(options, job_id)
     paths = JobPaths.for_job(settings.work_dir, resolved_id).ensure()
     state = _begin_job(paths, resolved_id, options)
@@ -174,6 +187,29 @@ def run_pipeline(
                 },
             )
 
+            # --- align (optional) ---
+            alignments = None
+            if want_subs:
+                assert aligner is not None
+                _enter_stage(state, paths, JobStage.ALIGN, resolved_id)
+                state.progress = align_chapters(
+                    chapters=chapters,
+                    paths=paths,
+                    options=options,
+                    backend=aligner,
+                    progress=state.progress,
+                )
+                _touch_and_save(state, paths)
+                alignments = load_alignments_for_chapters(chapters, paths)
+                logger.info(
+                    "align complete",
+                    extra={
+                        "job_id": resolved_id,
+                        "stage": JobStage.ALIGN.value,
+                        "event": "stage_end",
+                    },
+                )
+
             # --- package ---
             _enter_stage(state, paths, JobStage.PACKAGE, resolved_id)
             manifest = package_book(
@@ -181,6 +217,8 @@ def run_pipeline(
                 paths=paths,
                 ffmpeg=ffmpeg,
                 book_slug=_book_slug(resolved_id, options.source),
+                alignments=alignments,
+                include_subtitles=want_subs,
             )
             state.artifacts = manifest
             completed = _complete_job(state, paths)
@@ -349,11 +387,13 @@ def run_package(
     *,
     job_or_path: str,
     ffmpeg: FfmpegRunner,
+    aligner: AlignmentBackend | None = None,
 ) -> JobState:
     """Package chapter audio into M4B for an existing job.
 
-    Requires ``job.json`` with chapters. On success ``status=completed``,
-    ``stage=package``, and ``artifacts`` set.
+    Requires ``job.json`` with chapters. When job options enable subtitles,
+    runs align if needed (using *aligner*) then muxes ``mov_text``.
+    On success ``status=completed``, ``stage=package``, and ``artifacts`` set.
     """
     paths = resolve_job_paths(job_or_path, settings.work_dir)
     state = load_job(paths.job_json)
@@ -379,12 +419,33 @@ def run_package(
         _touch_and_save(state, paths)
 
         try:
+            options = state.options
+            want_subs = _want_subtitles(options)
+            alignments = None
+            if want_subs:
+                if aligner is None:
+                    raise ValueError(
+                        "aligner backend is required when subtitles are enabled"
+                    )
+                _enter_stage(state, paths, JobStage.ALIGN, state.job_id)
+                state.progress = align_chapters(
+                    chapters=state.chapters,
+                    paths=paths,
+                    options=options,
+                    backend=aligner,
+                    progress=state.progress,
+                )
+                _touch_and_save(state, paths)
+                alignments = load_alignments_for_chapters(state.chapters, paths)
+
             _enter_stage(state, paths, JobStage.PACKAGE, state.job_id)
             manifest = package_book(
                 chapters=state.chapters,
                 paths=paths,
                 ffmpeg=ffmpeg,
                 book_slug=_book_slug(state.job_id, state.source),
+                alignments=alignments,
+                include_subtitles=want_subs,
             )
             state.artifacts = manifest
             completed = _complete_job(state, paths)
@@ -403,7 +464,7 @@ def run_package(
                 exc,
                 extra={
                     "job_id": state.job_id,
-                    "stage": JobStage.PACKAGE.value,
+                    "stage": state.stage.value if state.stage else None,
                     "event": "pipeline_failed",
                 },
             )
@@ -435,6 +496,7 @@ def resolve_job_paths(job_or_path: str, work_dir: Path) -> JobPaths:
             source=root / "source",
             prepared=root / "prepared",
             audio=root / "audio",
+            aligned=root / "aligned",
             out=root / "out",
             job_json=job_json,
             job_log=root / "job.log",
@@ -486,6 +548,11 @@ def _job_file_logging(
                     )
     finally:
         detach_handler(handler)
+
+
+def _want_subtitles(options: BuildOptions) -> bool:
+    """True when the build should align and mux a subtitle track."""
+    return bool(options.subtitles) and not bool(options.skip_align)
 
 
 def _enter_stage(

@@ -16,6 +16,7 @@ class JobPaths:
     audio: Path
     out: Path
     job_json: Path
+    job_log: Path
 
     @classmethod
     def for_job(cls, work_dir: Path, job_id: str) -> JobPaths:
@@ -28,6 +29,7 @@ class JobPaths:
             audio=root / "audio",
             out=root / "out",
             job_json=root / "job.json",
+            job_log=root / "job.log",
         )
 
     def ensure(self) -> JobPaths:

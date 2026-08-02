@@ -16,6 +16,7 @@ def test_for_job_layout(tmp_path: Path) -> None:
     assert paths.audio == root / "audio"
     assert paths.out == root / "out"
     assert paths.job_json == root / "job.json"
+    assert paths.job_log == root / "job.log"
 
 
 def test_ensure_creates_directories(tmp_path: Path) -> None:

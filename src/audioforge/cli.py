@@ -10,6 +10,7 @@ import typer
 from audioforge import __version__
 from audioforge.factory import create_default_backends
 from audioforge.jobstore import load_job
+from audioforge.logging_config import configure_logging
 from audioforge.models import BuildOptions, JobState
 from audioforge.pipeline.orchestrator import (
     PipelineError,
@@ -41,6 +42,8 @@ def main(
     ] = False,
 ) -> None:
     """AudioForge CLI entrypoint."""
+    settings = AppSettings()
+    configure_logging(level=settings.log_level, fmt=settings.log_format)
     if version:
         typer.echo(f"audioforge {__version__}")
         raise typer.Exit()

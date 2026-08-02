@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from audioforge.backends.protocols import TtsBackend
 from audioforge.io.paths import JobPaths
+from audioforge.logging_config import get_logger
 from audioforge.models import BuildOptions, ChapterProgress, ChapterRef
+
+logger = get_logger(__name__)
 
 
 class TtsError(Exception):
@@ -51,18 +54,70 @@ def synthesize_chapters(
         if options.resume and not options.force and out.is_file():
             entry.audio_done = True
             entry.error = None
+            logger.info(
+                "tts skip chapter %s (resume)",
+                chapter.index,
+                extra={
+                    "stage": "tts",
+                    "event": "chapter_skip",
+                    "chapter_index": chapter.index,
+                    "chapter_slug": chapter.slug,
+                    "chapter_total": len(chapters),
+                },
+            )
             continue
 
         try:
             if not prepared_path.is_file():
                 raise FileNotFoundError(f"Prepared text missing: {prepared_path}")
             text = prepared_path.read_text(encoding="utf-8")
+            logger.info(
+                "tts chapter %s/%s %s (%s chars) → %s",
+                chapter.index,
+                len(chapters),
+                chapter.slug,
+                len(text),
+                out.name,
+                extra={
+                    "stage": "tts",
+                    "event": "chapter_start",
+                    "chapter_index": chapter.index,
+                    "chapter_slug": chapter.slug,
+                    "chapter_total": len(chapters),
+                    "chars": len(text),
+                    "voice": options.voice,
+                },
+            )
             backend.synthesize(text, voice=options.voice, out_path=out)
             entry.audio_done = True
             entry.error = None
+            logger.info(
+                "tts done chapter %s",
+                chapter.index,
+                extra={
+                    "stage": "tts",
+                    "event": "chapter_end",
+                    "chapter_index": chapter.index,
+                    "chapter_slug": chapter.slug,
+                    "chapter_total": len(chapters),
+                },
+            )
         except Exception as exc:
             entry.audio_done = False
             entry.error = str(exc)
+            logger.error(
+                "tts failed chapter %s (%s): %s",
+                chapter.index,
+                chapter.slug,
+                exc,
+                extra={
+                    "stage": "tts",
+                    "event": "chapter_failed",
+                    "chapter_index": chapter.index,
+                    "chapter_slug": chapter.slug,
+                    "chapter_total": len(chapters),
+                },
+            )
             raise TtsError(
                 f"TTS failed for chapter {chapter.index} ({chapter.slug}): {exc}"
             ) from exc

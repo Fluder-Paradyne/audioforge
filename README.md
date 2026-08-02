@@ -203,6 +203,16 @@ Settings are loaded via Pydantic Settings (`AppSettings`). Environment variables
 | `AUDIOFORGE_DEFAULT_PREP_MODEL` | Default Ollama model | `llama3.2:3b` |
 | `AUDIOFORGE_HOST` | API bind host | `127.0.0.1` |
 | `AUDIOFORGE_PORT` | API bind port | `8765` |
+| `AUDIOFORGE_LOG_LEVEL` | Console log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`) | `INFO` |
+| `AUDIOFORGE_LOG_FORMAT` | Console/job log format: `text` or `json` | `text` |
+
+`AUDIOFORGE_LOG_LEVEL` controls the **console** handler. The package logger stays at DEBUG so handlers can filter independently (e.g. a verbose `job.log` while console stays INFO). Invalid values like `NOTSET` or typos are rejected.
+
+For machine-readable logs (JSON Lines on stderr and in `job.log`):
+
+```bash
+AUDIOFORGE_LOG_FORMAT=json AUDIOFORGE_LOG_LEVEL=DEBUG audioforge build ./my-book --skip-prep
+```
 
 Additional (factory, not in `AppSettings`):
 
@@ -219,6 +229,7 @@ work/<job-id>/
   audio/            # per-chapter audio
   out/              # final .m4b
   job.json          # JobState (source of truth)
+  job.log           # Structured pipeline log for this job
 ```
 
 ## Development

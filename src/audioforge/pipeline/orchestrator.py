@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -31,6 +33,12 @@ from audioforge.backends.protocols import (
 )
 from audioforge.io.paths import JobPaths
 from audioforge.jobstore import load_job, save_job
+from audioforge.logging_config import (
+    attach_job_file_handler,
+    detach_handler,
+    get_logger,
+    job_logging_context,
+)
 from audioforge.models import (
     BuildOptions,
     ChapterProgress,
@@ -47,6 +55,7 @@ from audioforge.settings import AppSettings
 
 # Safe path segment from a local directory/file name (fallback when empty).
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+logger = get_logger(__name__)
 
 
 class PipelineError(Exception):
@@ -103,58 +112,98 @@ def run_pipeline(
     paths = JobPaths.for_job(settings.work_dir, resolved_id).ensure()
     state = _begin_job(paths, resolved_id, options)
 
-    try:
-        # --- ingest ---
-        state.stage = JobStage.INGEST
-        _touch_and_save(state, paths)
-        chapters = ingest(
-            source=options.source,
-            paths=paths,
-            options=options,
-            runner=fictionreaper,
-        )
-        state.chapters = chapters
-        # Share progress objects with stages so fail-fast mutations persist.
-        state.progress = _merge_progress(state.progress, chapters)
-        _touch_and_save(state, paths)
+    with _job_file_logging(paths, settings, resolved_id):
+        try:
+            # --- ingest ---
+            _enter_stage(state, paths, JobStage.INGEST, resolved_id)
+            chapters = ingest(
+                source=options.source,
+                paths=paths,
+                options=options,
+                runner=fictionreaper,
+            )
+            state.chapters = chapters
+            # Share progress objects with stages so fail-fast mutations persist.
+            state.progress = _merge_progress(state.progress, chapters)
+            _touch_and_save(state, paths)
+            logger.info(
+                "ingest complete",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.INGEST.value,
+                    "event": "stage_end",
+                    "chapter_total": len(chapters),
+                },
+            )
 
-        # --- prep ---
-        state.stage = JobStage.PREP
-        _touch_and_save(state, paths)
-        state.progress = prep_chapters(
-            chapters=chapters,
-            paths=paths,
-            options=options,
-            backend=prep,
-            progress=state.progress,
-        )
-        _touch_and_save(state, paths)
+            # --- prep ---
+            _enter_stage(state, paths, JobStage.PREP, resolved_id)
+            state.progress = prep_chapters(
+                chapters=chapters,
+                paths=paths,
+                options=options,
+                backend=prep,
+                progress=state.progress,
+            )
+            _touch_and_save(state, paths)
+            logger.info(
+                "prep complete",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.PREP.value,
+                    "event": "stage_end",
+                },
+            )
 
-        # --- tts ---
-        state.stage = JobStage.TTS
-        _touch_and_save(state, paths)
-        state.progress = synthesize_chapters(
-            chapters=chapters,
-            paths=paths,
-            options=options,
-            backend=tts,
-            progress=state.progress,
-        )
-        _touch_and_save(state, paths)
+            # --- tts ---
+            _enter_stage(state, paths, JobStage.TTS, resolved_id)
+            state.progress = synthesize_chapters(
+                chapters=chapters,
+                paths=paths,
+                options=options,
+                backend=tts,
+                progress=state.progress,
+            )
+            _touch_and_save(state, paths)
+            logger.info(
+                "tts complete",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.TTS.value,
+                    "event": "stage_end",
+                },
+            )
 
-        # --- package ---
-        state.stage = JobStage.PACKAGE
-        _touch_and_save(state, paths)
-        manifest = package_book(
-            chapters=chapters,
-            paths=paths,
-            ffmpeg=ffmpeg,
-            book_slug=_book_slug(resolved_id, options.source),
-        )
-        state.artifacts = manifest
-        return _complete_job(state, paths)
-    except Exception as exc:
-        raise _fail_job(state, paths, exc) from exc
+            # --- package ---
+            _enter_stage(state, paths, JobStage.PACKAGE, resolved_id)
+            manifest = package_book(
+                chapters=chapters,
+                paths=paths,
+                ffmpeg=ffmpeg,
+                book_slug=_book_slug(resolved_id, options.source),
+            )
+            state.artifacts = manifest
+            completed = _complete_job(state, paths)
+            logger.info(
+                "pipeline completed",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.PACKAGE.value,
+                    "event": "pipeline_end",
+                },
+            )
+            return completed
+        except Exception as exc:
+            logger.exception(
+                "pipeline failed: %s",
+                exc,
+                extra={
+                    "job_id": resolved_id,
+                    "stage": state.stage.value if state.stage else None,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise _fail_job(state, paths, exc) from exc
 
 
 def run_prepare(
@@ -175,31 +224,57 @@ def run_prepare(
     paths = JobPaths.for_job(settings.work_dir, resolved_id).ensure()
     state = _begin_job(paths, resolved_id, options)
 
-    try:
-        state.stage = JobStage.INGEST
-        _touch_and_save(state, paths)
-        chapters = ingest(
-            source=options.source,
-            paths=paths,
-            options=options,
-            runner=fictionreaper,
-        )
-        state.chapters = chapters
-        state.progress = _merge_progress(state.progress, chapters)
-        _touch_and_save(state, paths)
+    with _job_file_logging(paths, settings, resolved_id):
+        try:
+            _enter_stage(state, paths, JobStage.INGEST, resolved_id)
+            chapters = ingest(
+                source=options.source,
+                paths=paths,
+                options=options,
+                runner=fictionreaper,
+            )
+            state.chapters = chapters
+            state.progress = _merge_progress(state.progress, chapters)
+            _touch_and_save(state, paths)
+            logger.info(
+                "ingest complete",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.INGEST.value,
+                    "event": "stage_end",
+                    "chapter_total": len(chapters),
+                },
+            )
 
-        state.stage = JobStage.PREP
-        _touch_and_save(state, paths)
-        state.progress = prep_chapters(
-            chapters=chapters,
-            paths=paths,
-            options=options,
-            backend=prep,
-            progress=state.progress,
-        )
-        return _complete_job(state, paths)
-    except Exception as exc:
-        raise _fail_job(state, paths, exc) from exc
+            _enter_stage(state, paths, JobStage.PREP, resolved_id)
+            state.progress = prep_chapters(
+                chapters=chapters,
+                paths=paths,
+                options=options,
+                backend=prep,
+                progress=state.progress,
+            )
+            completed = _complete_job(state, paths)
+            logger.info(
+                "prepare completed",
+                extra={
+                    "job_id": resolved_id,
+                    "stage": JobStage.PREP.value,
+                    "event": "pipeline_end",
+                },
+            )
+            return completed
+        except Exception as exc:
+            logger.exception(
+                "prepare failed: %s",
+                exc,
+                extra={
+                    "job_id": resolved_id,
+                    "stage": state.stage.value if state.stage else None,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise _fail_job(state, paths, exc) from exc
 
 
 def run_synthesize(
@@ -215,31 +290,58 @@ def run_synthesize(
     """
     paths = resolve_job_paths(job_or_path, settings.work_dir)
     state = load_job(paths.job_json)
-    if not state.chapters:
-        state.status = JobStatus.FAILED
-        state.error = "Job has no chapters; run prepare first"
-        state.stage = JobStage.TTS
-        _touch_and_save(state, paths)
-        raise PipelineError(state.error, state=state)
 
-    options = state.options
-    state.status = JobStatus.RUNNING
-    state.error = None
-    _touch_and_save(state, paths)
+    with _job_file_logging(paths, settings, state.job_id):
+        if not state.chapters:
+            state.status = JobStatus.FAILED
+            state.error = "Job has no chapters; run prepare first"
+            state.stage = JobStage.TTS
+            _touch_and_save(state, paths)
+            logger.error(
+                "synthesize aborted: no chapters",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.TTS.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise PipelineError(state.error, state=state)
 
-    try:
-        state.stage = JobStage.TTS
+        options = state.options
+        state.status = JobStatus.RUNNING
+        state.error = None
         _touch_and_save(state, paths)
-        state.progress = synthesize_chapters(
-            chapters=state.chapters,
-            paths=paths,
-            options=options,
-            backend=tts,
-            progress=state.progress,
-        )
-        return _complete_job(state, paths)
-    except Exception as exc:
-        raise _fail_job(state, paths, exc) from exc
+
+        try:
+            _enter_stage(state, paths, JobStage.TTS, state.job_id)
+            state.progress = synthesize_chapters(
+                chapters=state.chapters,
+                paths=paths,
+                options=options,
+                backend=tts,
+                progress=state.progress,
+            )
+            completed = _complete_job(state, paths)
+            logger.info(
+                "synthesize completed",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.TTS.value,
+                    "event": "pipeline_end",
+                },
+            )
+            return completed
+        except Exception as exc:
+            logger.exception(
+                "synthesize failed: %s",
+                exc,
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.TTS.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise _fail_job(state, paths, exc) from exc
 
 
 def run_package(
@@ -255,30 +357,57 @@ def run_package(
     """
     paths = resolve_job_paths(job_or_path, settings.work_dir)
     state = load_job(paths.job_json)
-    if not state.chapters:
-        state.status = JobStatus.FAILED
-        state.error = "Job has no chapters; run prepare first"
-        state.stage = JobStage.PACKAGE
-        _touch_and_save(state, paths)
-        raise PipelineError(state.error, state=state)
 
-    state.status = JobStatus.RUNNING
-    state.error = None
-    _touch_and_save(state, paths)
+    with _job_file_logging(paths, settings, state.job_id):
+        if not state.chapters:
+            state.status = JobStatus.FAILED
+            state.error = "Job has no chapters; run prepare first"
+            state.stage = JobStage.PACKAGE
+            _touch_and_save(state, paths)
+            logger.error(
+                "package aborted: no chapters",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.PACKAGE.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise PipelineError(state.error, state=state)
 
-    try:
-        state.stage = JobStage.PACKAGE
+        state.status = JobStatus.RUNNING
+        state.error = None
         _touch_and_save(state, paths)
-        manifest = package_book(
-            chapters=state.chapters,
-            paths=paths,
-            ffmpeg=ffmpeg,
-            book_slug=_book_slug(state.job_id, state.source),
-        )
-        state.artifacts = manifest
-        return _complete_job(state, paths)
-    except Exception as exc:
-        raise _fail_job(state, paths, exc) from exc
+
+        try:
+            _enter_stage(state, paths, JobStage.PACKAGE, state.job_id)
+            manifest = package_book(
+                chapters=state.chapters,
+                paths=paths,
+                ffmpeg=ffmpeg,
+                book_slug=_book_slug(state.job_id, state.source),
+            )
+            state.artifacts = manifest
+            completed = _complete_job(state, paths)
+            logger.info(
+                "package completed",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.PACKAGE.value,
+                    "event": "pipeline_end",
+                },
+            )
+            return completed
+        except Exception as exc:
+            logger.exception(
+                "package failed: %s",
+                exc,
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.PACKAGE.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise _fail_job(state, paths, exc) from exc
 
 
 def resolve_job_paths(job_or_path: str, work_dir: Path) -> JobPaths:
@@ -308,6 +437,7 @@ def resolve_job_paths(job_or_path: str, work_dir: Path) -> JobPaths:
             audio=root / "audio",
             out=root / "out",
             job_json=job_json,
+            job_log=root / "job.log",
         )
         if not paths.job_json.is_file():
             raise FileNotFoundError(f"No job.json found at {paths.job_json}")
@@ -319,6 +449,63 @@ def resolve_job_paths(job_or_path: str, work_dir: Path) -> JobPaths:
             f"No job found for {job_or_path!r} (looked for {paths.job_json})"
         )
     return paths
+
+
+@contextmanager
+def _job_file_logging(
+    paths: JobPaths,
+    settings: AppSettings,
+    job_id: str,
+) -> Iterator[None]:
+    """Attach filtered ``job.log`` and bind job context for the entrypoint.
+
+    Detach always runs in an outer ``finally`` so bookend log I/O failures
+    cannot leak ``FileHandler``s on long-lived API processes.
+    """
+    handler = attach_job_file_handler(
+        paths.job_log,
+        job_id=job_id,
+        fmt=settings.log_format,
+        level=settings.log_level,
+    )
+    try:
+        with job_logging_context(job_id):
+            # Bookend logging must not prevent the pipeline or detach.
+            with suppress(Exception):
+                logger.info(
+                    "job started",
+                    extra={"job_id": job_id, "event": "job_start"},
+                )
+            try:
+                yield
+            finally:
+                with suppress(Exception):
+                    logger.info(
+                        "job log closed",
+                        extra={"job_id": job_id, "event": "job_log_close"},
+                    )
+    finally:
+        detach_handler(handler)
+
+
+def _enter_stage(
+    state: JobState,
+    paths: JobPaths,
+    stage: JobStage,
+    job_id: str,
+) -> None:
+    """Set stage, persist, and emit a stage_start log event."""
+    state.stage = stage
+    _touch_and_save(state, paths)
+    logger.info(
+        "stage start: %s",
+        stage.value,
+        extra={
+            "job_id": job_id,
+            "stage": stage.value,
+            "event": "stage_start",
+        },
+    )
 
 
 def _begin_job(

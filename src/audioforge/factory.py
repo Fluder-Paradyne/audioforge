@@ -10,11 +10,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from audioforge.backends.alignment import ProportionalAlignmentBackend
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import SubprocessFfmpegRunner
 from audioforge.backends.fictionreaper import SubprocessFictionReaperRunner
 from audioforge.backends.kokoro_tts import KokoroNotInstalledError, KokoroTtsBackend
 from audioforge.backends.protocols import (
+    AlignmentBackend,
     FfmpegRunner,
     FictionReaperRunner,
     TextPrepBackend,
@@ -38,6 +40,7 @@ class DefaultBackends:
     tts: TtsBackend
     ffmpeg: FfmpegRunner
     fictionreaper: FictionReaperRunner
+    aligner: AlignmentBackend | None
 
 
 def create_default_backends(
@@ -46,7 +49,7 @@ def create_default_backends(
     *,
     ollama_available: bool = False,
 ) -> DefaultBackends:
-    """Select prep/TTS/FFmpeg/FictionReaper backends from settings and options.
+    """Select prep/TTS/FFmpeg/FictionReaper/align backends from settings.
 
     TTS selection:
 
@@ -54,6 +57,9 @@ def create_default_backends(
     * On :class:`~audioforge.backends.kokoro_tts.KokoroNotInstalledError`, use
       :class:`~audioforge.backends.fake.FakeTtsBackend` only when the environment
       variable ``AUDIOFORGE_ALLOW_FAKE_TTS=1``; otherwise re-raise.
+
+    Alignment: phrase-proportional backend when subtitles are enabled; else
+    ``None`` (true forced-alignment engines can replace this later).
     """
     prep = select_prep_backend(
         settings,
@@ -63,11 +69,16 @@ def create_default_backends(
     tts = _select_tts_backend()
     ffmpeg: FfmpegRunner = SubprocessFfmpegRunner(ffmpeg_path=settings.ffmpeg_path)
     fictionreaper: FictionReaperRunner = SubprocessFictionReaperRunner()
+    want_subs = bool(options.subtitles) and not bool(options.skip_align)
+    aligner: AlignmentBackend | None = (
+        ProportionalAlignmentBackend() if want_subs else None
+    )
     return DefaultBackends(
         prep=prep,
         tts=tts,
         ffmpeg=ffmpeg,
         fictionreaper=fictionreaper,
+        aligner=aligner,
     )
 
 

@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from audioforge.api.app import create_app
+from audioforge.backends.alignment import FakeAlignmentBackend
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import FakeFfmpegRunner
 from audioforge.backends.fictionreaper import FakeFictionReaperRunner
@@ -41,6 +42,7 @@ def _fake_kwargs() -> dict[str, object]:
         "tts": FakeTtsBackend(),
         "ffmpeg": FakeFfmpegRunner(),
         "fictionreaper": FakeFictionReaperRunner(),
+        "aligner": FakeAlignmentBackend(),
     }
 
 
@@ -191,6 +193,7 @@ def test_create_job_uses_default_backends(
             tts=FakeTtsBackend(),
             ffmpeg=FakeFfmpegRunner(),
             fictionreaper=FakeFictionReaperRunner(),
+            aligner=FakeAlignmentBackend(),
         )
 
     monkeypatch.setattr(
@@ -226,6 +229,7 @@ def test_create_job_partial_backend_injection(
             tts=FakeTtsBackend(),
             ffmpeg=FakeFfmpegRunner(),
             fictionreaper=FakeFictionReaperRunner(),
+            aligner=FakeAlignmentBackend(),
         ),
     )
     client = TestClient(application)

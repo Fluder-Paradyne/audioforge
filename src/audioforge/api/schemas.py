@@ -23,6 +23,8 @@ class CreateJobRequest(BaseModel):
     force: bool = False
     fictionreaper_bin: str = "fictionreaper"
     job_id: str | None = None
+    subtitles: bool = True
+    skip_align: bool = False
 
 
 class CreateJobResponse(BaseModel):

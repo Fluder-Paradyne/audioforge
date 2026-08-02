@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from audioforge import __version__
+from audioforge.backends.alignment import FakeAlignmentBackend
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import FakeFfmpegRunner
 from audioforge.backends.fictionreaper import FakeFictionReaperRunner
@@ -41,6 +42,7 @@ def _fake_backends() -> DefaultBackends:
         tts=FakeTtsBackend(),
         ffmpeg=FakeFfmpegRunner(),
         fictionreaper=FakeFictionReaperRunner(),
+        aligner=FakeAlignmentBackend(),
     )
 
 
@@ -404,7 +406,14 @@ def test_package_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     save_job(state, paths.job_json)
     monkeypatch.setenv("AUDIOFORGE_WORK_DIR", str(work))
 
-    def fake_pkg(settings: Any, *, job_or_path: str, ffmpeg: Any) -> JobState:
+    def fake_pkg(
+        settings: Any,
+        *,
+        job_or_path: str,
+        ffmpeg: Any,
+        aligner: Any = None,
+    ) -> JobState:
+        del aligner
         out = state.model_copy(deep=True)
         out.status = JobStatus.COMPLETED
         out.stage = JobStage.PACKAGE

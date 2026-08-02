@@ -7,12 +7,20 @@ FFmpeg strategy (documented, deterministic for tests):
 3. Write a concat demuxer list (``paths.out / concat.txt``) listing each WAV.
 4. Write FFMETADATA1 chapters (``paths.out / chapters.ffmetadata``) with
    ``TIMEBASE=1/1000`` and cumulative START/END times in milliseconds.
-5. Invoke the injectable :class:`~audioforge.backends.protocols.FfmpegRunner`::
+5. Optionally load alignments, write book WebVTT, mux ``mov_text`` subtitles.
+6. Invoke the injectable :class:`~audioforge.backends.protocols.FfmpegRunner`::
 
+       Without subtitles:
        -y -f concat -safe 0 -i <concat> -i <ffmetadata>
        -map 0:a -map_metadata 1 -map_chapters 1
        -c:a aac -b:a 128k -movflags +faststart
-       <paths.out / {book_slug}.m4b>
+       <m4b>
+
+       With subtitles:
+       ... -i <subtitles.vtt>
+       -map 0:a -map_metadata 1 -map_chapters 1 -map 2:s
+       -c:a aac -b:a 128k -c:s mov_text -movflags +faststart
+       <m4b>
 
 Chapter WAVs stay under ``paths.audio`` and are listed on the returned
 :class:`~audioforge.models.ArtifactManifest`.
@@ -27,7 +35,8 @@ from pathlib import Path
 from audioforge.backends.protocols import FfmpegRunner
 from audioforge.io.paths import JobPaths
 from audioforge.logging_config import get_logger
-from audioforge.models import ArtifactManifest, ChapterRef
+from audioforge.models import ArtifactManifest, ChapterAlignment, ChapterRef
+from audioforge.pipeline.subtitles import build_book_vtt, write_book_vtt
 from audioforge.pipeline.tts import audio_filename
 
 logger = get_logger(__name__)
@@ -37,6 +46,7 @@ _DEFAULT_BOOK_SLUG = "audiobook"
 
 CONCAT_LIST_NAME = "concat.txt"
 CHAPTERS_METADATA_NAME = "chapters.ffmetadata"
+SUBTITLES_VTT_NAME = "subtitles.vtt"
 
 
 class PackageError(Exception):
@@ -60,6 +70,8 @@ def package_book(
     ffmpeg: FfmpegRunner,
     book_slug: str | None = None,
     duration_seconds: Callable[[Path], float] | None = None,
+    alignments: list[ChapterAlignment] | None = None,
+    include_subtitles: bool = False,
 ) -> ArtifactManifest:
     """Verify chapter audio, write concat/metadata, encode chaptered M4B.
 
@@ -78,6 +90,10 @@ def package_book(
     duration_seconds:
         Callable returning chapter duration in seconds for marker END times.
         Defaults to :func:`wav_duration_seconds`.
+    alignments:
+        Per-chapter alignments when *include_subtitles* is true.
+    include_subtitles:
+        When true, write WebVTT and mux a ``mov_text`` track into the M4B.
     """
     if not chapters:
         raise PackageError("No chapters to package")
@@ -87,17 +103,10 @@ def package_book(
     if not slug.strip():
         raise PackageError("book_slug must be non-empty")
 
+    if include_subtitles and alignments is None:
+        raise PackageError("include_subtitles requires alignments")
+
     probe = duration_seconds if duration_seconds is not None else wav_duration_seconds
-    logger.info(
-        "package start (%s chapters) → %s.m4b",
-        len(chapters),
-        slug,
-        extra={
-            "stage": "package",
-            "event": "package_start",
-            "chapter_total": len(chapters),
-        },
-    )
 
     chapter_audio: list[Path] = []
     durations: list[float] = []
@@ -121,11 +130,23 @@ def package_book(
     concat_path = paths.out / CONCAT_LIST_NAME
     metadata_path = paths.out / CHAPTERS_METADATA_NAME
     m4b_path = paths.out / f"{slug}.m4b"
+    vtt_path: Path | None = None
 
     _write_concat_list(concat_path, chapter_audio)
     _write_ffmetadata(metadata_path, chapters, durations)
 
-    args = [
+    logger.info(
+        "package start (%s chapters) → %s.m4b",
+        len(chapters),
+        slug,
+        extra={
+            "stage": "package",
+            "event": "package_start",
+            "chapter_total": len(chapters),
+        },
+    )
+
+    args: list[str] = [
         "-y",
         "-f",
         "concat",
@@ -135,22 +156,59 @@ def package_book(
         str(concat_path.resolve()),
         "-i",
         str(metadata_path.resolve()),
-        "-map",
-        "0:a",
-        "-map_metadata",
-        "1",
-        "-map_chapters",
-        "1",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(m4b_path.resolve()),
     ]
+
+    if include_subtitles:
+        assert alignments is not None
+        try:
+            vtt_body = build_book_vtt(chapters, alignments, durations)
+            vtt_path = write_book_vtt(paths.out / SUBTITLES_VTT_NAME, vtt_body)
+        except Exception as exc:
+            raise PackageError(f"Failed to build subtitles: {exc}") from exc
+        args.extend(["-i", str(vtt_path.resolve())])
+        args.extend(
+            [
+                "-map",
+                "0:a",
+                "-map_metadata",
+                "1",
+                "-map_chapters",
+                "1",
+                "-map",
+                "2:s",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-c:s",
+                "mov_text",
+                "-movflags",
+                "+faststart",
+                str(m4b_path.resolve()),
+            ]
+        )
+    else:
+        args.extend(
+            [
+                "-map",
+                "0:a",
+                "-map_metadata",
+                "1",
+                "-map_chapters",
+                "1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                str(m4b_path.resolve()),
+            ]
+        )
+
     logger.info(
-        "package invoking ffmpeg",
+        "package invoking ffmpeg (subtitles=%s)",
+        include_subtitles,
         extra={
             "stage": "package",
             "event": "ffmpeg_start",
@@ -176,7 +234,11 @@ def package_book(
             "chapter_total": len(chapters),
         },
     )
-    return ArtifactManifest(chapter_audio=chapter_audio, m4b_path=m4b_path)
+    return ArtifactManifest(
+        chapter_audio=chapter_audio,
+        m4b_path=m4b_path,
+        subtitles_vtt=vtt_path,
+    )
 
 
 def _write_concat_list(path: Path, audio_files: list[Path]) -> None:

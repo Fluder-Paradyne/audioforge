@@ -62,6 +62,8 @@ def _build_options(
     force: bool,
     fictionreaper_bin: str,
     job_id: str | None,
+    subtitles: bool = True,
+    skip_align: bool = False,
 ) -> BuildOptions:
     return BuildOptions(
         source=source,
@@ -75,6 +77,8 @@ def _build_options(
         fictionreaper_bin=fictionreaper_bin,
         output_dir=output_dir,
         job_id=job_id,
+        subtitles=subtitles,
+        skip_align=skip_align,
     )
 
 
@@ -134,8 +138,22 @@ def build(
         str | None,
         typer.Option("--job-id", help="Explicit job id under the work directory."),
     ] = None,
+    subtitles: Annotated[
+        bool,
+        typer.Option(
+            "--subtitles/--no-subtitles",
+            help="Align text to audio and mux mov_text into the M4B.",
+        ),
+    ] = True,
+    skip_align: Annotated[
+        bool,
+        typer.Option(
+            "--skip-align",
+            help="Skip alignment; package without a subtitle track.",
+        ),
+    ] = False,
 ) -> None:
-    """Run the full ingest → prep → tts → package pipeline."""
+    """Run the full ingest → prep → tts → align → package pipeline."""
     settings = AppSettings()
     options = _build_options(
         source=source,
@@ -148,6 +166,8 @@ def build(
         force=force,
         fictionreaper_bin=fictionreaper_bin,
         job_id=job_id,
+        subtitles=subtitles,
+        skip_align=skip_align,
     )
     backends = create_default_backends(settings, options)
     try:
@@ -158,6 +178,7 @@ def build(
             tts=backends.tts,
             ffmpeg=backends.ffmpeg,
             fictionreaper=backends.fictionreaper,
+            aligner=backends.aligner,
             job_id=job_id,
         )
     except PipelineError as exc:
@@ -284,6 +305,7 @@ def package_cmd(
             settings,
             job_or_path=job_or_path,
             ffmpeg=backends.ffmpeg,
+            aligner=backends.aligner,
         )
     except PipelineError as exc:
         _exit_pipeline_error(exc)

@@ -39,12 +39,14 @@ def test_job_stage_values() -> None:
     assert JobStage.INGEST.value == "ingest"
     assert JobStage.PREP.value == "prep"
     assert JobStage.TTS.value == "tts"
+    assert JobStage.ALIGN.value == "align"
     assert JobStage.PACKAGE.value == "package"
     assert JobStage("tts") is JobStage.TTS
     assert set(JobStage) == {
         JobStage.INGEST,
         JobStage.PREP,
         JobStage.TTS,
+        JobStage.ALIGN,
         JobStage.PACKAGE,
     }
 

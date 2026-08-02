@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from audioforge.backends.alignment import (
+    AlignmentError,
+    FakeAlignmentBackend,
+    ProportionalAlignmentBackend,
+)
 from audioforge.backends.fake import FakeTtsBackend
 from audioforge.backends.ffmpeg import (
     FakeFfmpegRunner,
@@ -16,6 +21,7 @@ from audioforge.backends.fictionreaper import (
 from audioforge.backends.kokoro_tts import KokoroNotInstalledError, KokoroTtsBackend
 from audioforge.backends.ollama_prep import OllamaPrepError, OllamaTextPrep
 from audioforge.backends.protocols import (
+    AlignmentBackend,
     FfmpegRunner,
     FictionReaperRunner,
     TextPrepBackend,
@@ -24,6 +30,9 @@ from audioforge.backends.protocols import (
 from audioforge.backends.rules_prep import RulesTextPrep
 
 __all__ = [
+    "AlignmentBackend",
+    "AlignmentError",
+    "FakeAlignmentBackend",
     "FakeFfmpegRunner",
     "FakeFictionReaperRunner",
     "FakeTtsBackend",
@@ -35,6 +44,7 @@ __all__ = [
     "KokoroTtsBackend",
     "OllamaPrepError",
     "OllamaTextPrep",
+    "ProportionalAlignmentBackend",
     "RulesTextPrep",
     "SubprocessFfmpegRunner",
     "SubprocessFictionReaperRunner",

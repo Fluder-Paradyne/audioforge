@@ -37,6 +37,7 @@ from audioforge.logging_config import (
     attach_job_file_handler,
     detach_handler,
     get_logger,
+    job_logging_context,
 )
 from audioforge.models import (
     BuildOptions,
@@ -289,19 +290,28 @@ def run_synthesize(
     """
     paths = resolve_job_paths(job_or_path, settings.work_dir)
     state = load_job(paths.job_json)
-    if not state.chapters:
-        state.status = JobStatus.FAILED
-        state.error = "Job has no chapters; run prepare first"
-        state.stage = JobStage.TTS
-        _touch_and_save(state, paths)
-        raise PipelineError(state.error, state=state)
-
-    options = state.options
-    state.status = JobStatus.RUNNING
-    state.error = None
-    _touch_and_save(state, paths)
 
     with _job_file_logging(paths, settings, state.job_id):
+        if not state.chapters:
+            state.status = JobStatus.FAILED
+            state.error = "Job has no chapters; run prepare first"
+            state.stage = JobStage.TTS
+            _touch_and_save(state, paths)
+            logger.error(
+                "synthesize aborted: no chapters",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.TTS.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise PipelineError(state.error, state=state)
+
+        options = state.options
+        state.status = JobStatus.RUNNING
+        state.error = None
+        _touch_and_save(state, paths)
+
         try:
             _enter_stage(state, paths, JobStage.TTS, state.job_id)
             state.progress = synthesize_chapters(
@@ -347,18 +357,27 @@ def run_package(
     """
     paths = resolve_job_paths(job_or_path, settings.work_dir)
     state = load_job(paths.job_json)
-    if not state.chapters:
-        state.status = JobStatus.FAILED
-        state.error = "Job has no chapters; run prepare first"
-        state.stage = JobStage.PACKAGE
-        _touch_and_save(state, paths)
-        raise PipelineError(state.error, state=state)
-
-    state.status = JobStatus.RUNNING
-    state.error = None
-    _touch_and_save(state, paths)
 
     with _job_file_logging(paths, settings, state.job_id):
+        if not state.chapters:
+            state.status = JobStatus.FAILED
+            state.error = "Job has no chapters; run prepare first"
+            state.stage = JobStage.PACKAGE
+            _touch_and_save(state, paths)
+            logger.error(
+                "package aborted: no chapters",
+                extra={
+                    "job_id": state.job_id,
+                    "stage": JobStage.PACKAGE.value,
+                    "event": "pipeline_failed",
+                },
+            )
+            raise PipelineError(state.error, state=state)
+
+        state.status = JobStatus.RUNNING
+        state.error = None
+        _touch_and_save(state, paths)
+
         try:
             _enter_stage(state, paths, JobStage.PACKAGE, state.job_id)
             manifest = package_book(
@@ -438,24 +457,26 @@ def _job_file_logging(
     settings: AppSettings,
     job_id: str,
 ) -> Iterator[None]:
-    """Attach ``job.log`` for the duration of a pipeline entrypoint."""
+    """Attach filtered ``job.log`` and bind job context for the entrypoint."""
     handler = attach_job_file_handler(
         paths.job_log,
+        job_id=job_id,
         fmt=settings.log_format,
         level=settings.log_level,
     )
-    logger.info(
-        "job started",
-        extra={"job_id": job_id, "event": "job_start"},
-    )
-    try:
-        yield
-    finally:
+    with job_logging_context(job_id):
         logger.info(
-            "job log closed",
-            extra={"job_id": job_id, "event": "job_log_close"},
+            "job started",
+            extra={"job_id": job_id, "event": "job_start"},
         )
-        detach_handler(handler)
+        try:
+            yield
+        finally:
+            logger.info(
+                "job log closed",
+                extra={"job_id": job_id, "event": "job_log_close"},
+            )
+            detach_handler(handler)
 
 
 def _enter_stage(

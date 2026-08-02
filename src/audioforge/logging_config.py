@@ -3,6 +3,14 @@
 Console format is controlled by :class:`~audioforge.settings.AppSettings`
 (``log_level`` / ``log_format``). Per-job file logs append to
 ``work/<job-id>/job.log`` via :func:`attach_job_file_handler`.
+
+Job isolation
+-------------
+File handlers are attached to the shared ``audioforge`` package logger but
+each carries a :class:`JobIdFilter` so only records for that ``job_id`` are
+written. :class:`InjectJobIdFilter` plus a :mod:`contextvars` token fill
+``job_id`` on records emitted inside :func:`job_logging_context` so stage
+code does not have to pass it on every call.
 """
 
 from __future__ import annotations
@@ -10,6 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -30,6 +41,33 @@ _STRUCTURED_KEYS: tuple[str, ...] = (
 
 _ROOT_LOGGER_NAME = "audioforge"
 _CONFIGURED_FLAG = "_audioforge_configured"
+
+_current_job_id: ContextVar[str | None] = ContextVar(
+    "audioforge_job_id",
+    default=None,
+)
+
+
+class InjectJobIdFilter(logging.Filter):
+    """Copy the active job id from context onto records that lack one."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "job_id", None) is None:
+            ctx = _current_job_id.get()
+            if ctx is not None:
+                record.job_id = ctx
+        return True
+
+
+class JobIdFilter(logging.Filter):
+    """Accept only records whose ``job_id`` matches a single job."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__()
+        self.job_id = job_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return getattr(record, "job_id", None) == self.job_id
 
 
 class JsonFormatter(logging.Formatter):
@@ -82,11 +120,37 @@ def make_formatter(fmt: LogFormatName | str) -> logging.Formatter:
 
 
 def parse_log_level(level: str | int) -> int:
-    """Resolve a level name or int; invalid names fall back to INFO."""
+    """Resolve a level name or int.
+
+    Raises:
+        ValueError: If *level* is a string that is not a known log level name.
+    """
     if isinstance(level, int):
         return level
     mapping = logging.getLevelNamesMapping()
-    return mapping.get(level.strip().upper(), logging.INFO)
+    key = level.strip().upper()
+    if key not in mapping:
+        raise ValueError(f"Invalid log level: {level!r}")
+    return mapping[key]
+
+
+def _is_console_handler(handler: logging.Handler) -> bool:
+    """True for stream handlers that are not :class:`~logging.FileHandler`s.
+
+    ``FileHandler`` is a ``StreamHandler`` subclass, so we must exclude it.
+    """
+    return isinstance(handler, logging.StreamHandler) and not isinstance(
+        handler, logging.FileHandler
+    )
+
+
+def _ensure_package_logger_ready(level: int | None = None) -> logging.Logger:
+    """Return package logger; set level only if NOTSET (no permanent ratchet)."""
+    logger = logging.getLogger(_ROOT_LOGGER_NAME)
+    logger.propagate = False
+    if logger.level == logging.NOTSET:
+        logger.setLevel(level if level is not None else logging.INFO)
+    return logger
 
 
 def configure_logging(
@@ -100,48 +164,66 @@ def configure_logging(
 
     Idempotent unless *force* is true. Does not touch the root logger so
     third-party libraries (uvicorn, httpx) keep their own handlers.
+
+    Job :class:`~logging.FileHandler` instances are preserved so a force
+    reconfigure mid-run does not orphan open ``job.log`` handlers.
+
+    Inject filters live on **handlers** (not the package logger) so child
+    loggers that propagate still get ``job_id`` stamped from context.
     """
     logger = logging.getLogger(_ROOT_LOGGER_NAME)
+    resolved = parse_log_level(level)
     if getattr(logger, _CONFIGURED_FLAG, False) and not force:
-        logger.setLevel(parse_log_level(level))
+        logger.setLevel(resolved)
         return
 
-    logger.handlers.clear()
-    logger.setLevel(parse_log_level(level))
+    # Drop console handlers only; keep job FileHandlers.
+    for handler in list(logger.handlers):
+        if _is_console_handler(handler):
+            logger.removeHandler(handler)
+            handler.close()
+
+    logger.setLevel(resolved)
     logger.propagate = False
 
-    handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(make_formatter(fmt))
-    logger.addHandler(handler)
+    console = logging.StreamHandler(stream if stream is not None else sys.stderr)
+    console.setLevel(logging.DEBUG)
+    console.setFormatter(make_formatter(fmt))
+    # Handler-level inject works for records from any child logger.
+    console.addFilter(InjectJobIdFilter())
+    logger.addHandler(console)
     setattr(logger, _CONFIGURED_FLAG, True)
 
 
 def attach_job_file_handler(
     job_log: Path,
     *,
+    job_id: str,
     fmt: LogFormatName | str = "text",
     level: str | int = "DEBUG",
 ) -> logging.Handler:
-    """Append pipeline logs for one job to *job_log*; return the handler.
+    """Append logs for *job_id* only to *job_log*; return the handler.
 
     Call :func:`detach_handler` when the job finishes so handlers do not
     accumulate across runs in long-lived processes (API server).
 
-    Ensures the ``audioforge`` logger level is low enough that INFO/DEBUG
-    records are not filtered by the root logger's default WARNING threshold.
+    Records without matching ``job_id`` are filtered out (see
+    :class:`JobIdFilter`). Prefer emitting inside :func:`job_logging_context`
+    so :class:`InjectJobIdFilter` stamps the active job id automatically.
     """
+    if not job_id.strip():
+        raise ValueError("job_id must be non-empty")
+
     job_log.parent.mkdir(parents=True, exist_ok=True)
     resolved = parse_log_level(level)
-    package_logger = logging.getLogger(_ROOT_LOGGER_NAME)
-    if package_logger.level == logging.NOTSET or resolved < package_logger.level:
-        package_logger.setLevel(resolved)
-    # Keep records on the package logger (and its file/stream handlers).
-    package_logger.propagate = False
+    package_logger = _ensure_package_logger_ready(level=resolved)
 
     handler = logging.FileHandler(job_log, mode="a", encoding="utf-8")
     handler.setLevel(resolved)
     handler.setFormatter(make_formatter(fmt))
+    # Order: inject context job_id first, then isolate by job_id.
+    handler.addFilter(InjectJobIdFilter())
+    handler.addFilter(JobIdFilter(job_id))
     package_logger.addHandler(handler)
     return handler
 
@@ -151,6 +233,22 @@ def detach_handler(handler: logging.Handler) -> None:
     logger = logging.getLogger(_ROOT_LOGGER_NAME)
     logger.removeHandler(handler)
     handler.close()
+
+
+@contextmanager
+def job_logging_context(job_id: str) -> Iterator[None]:
+    """Bind *job_id* for the current context (thread/async task).
+
+    Records logged inside the block receive ``job_id`` via
+    :class:`InjectJobIdFilter` when not set explicitly in ``extra``.
+    """
+    if not job_id.strip():
+        raise ValueError("job_id must be non-empty")
+    token: Token[str | None] = _current_job_id.set(job_id)
+    try:
+        yield
+    finally:
+        _current_job_id.reset(token)
 
 
 def get_logger(name: str | None = None) -> logging.Logger:

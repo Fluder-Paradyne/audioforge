@@ -54,6 +54,17 @@ def synthesize_chapters(
         if options.resume and not options.force and out.is_file():
             entry.audio_done = True
             entry.error = None
+            logger.info(
+                "tts skip chapter %s (resume)",
+                chapter.index,
+                extra={
+                    "stage": "tts",
+                    "event": "chapter_skip",
+                    "chapter_index": chapter.index,
+                    "chapter_slug": chapter.slug,
+                    "chapter_total": len(chapters),
+                },
+            )
             continue
 
         try:

@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from audioforge.logging_config import (
     JsonFormatter,
@@ -17,9 +18,11 @@ from audioforge.logging_config import (
     configure_logging,
     detach_handler,
     get_logger,
+    job_logging_context,
     make_formatter,
     parse_log_level,
 )
+from audioforge.settings import AppSettings
 
 
 @pytest.fixture(autouse=True)
@@ -27,12 +30,14 @@ def _reset_audioforge_logger() -> Iterator[None]:
     """Isolate logging configuration across tests."""
     logger = logging.getLogger("audioforge")
     logger.handlers.clear()
+    logger.filters.clear()
     if hasattr(logger, "_audioforge_configured"):
         delattr(logger, "_audioforge_configured")
     logger.setLevel(logging.NOTSET)
     logger.propagate = True
     yield
     logger.handlers.clear()
+    logger.filters.clear()
     if hasattr(logger, "_audioforge_configured"):
         delattr(logger, "_audioforge_configured")
 
@@ -41,7 +46,8 @@ def test_parse_log_level_name_and_int() -> None:
     assert parse_log_level("DEBUG") == logging.DEBUG
     assert parse_log_level("info") == logging.INFO
     assert parse_log_level(logging.WARNING) == logging.WARNING
-    assert parse_log_level("not-a-level") == logging.INFO
+    with pytest.raises(ValueError, match="Invalid log level"):
+        parse_log_level("not-a-level")
 
 
 def test_make_formatter_json_and_text() -> None:
@@ -106,6 +112,19 @@ def test_json_formatter_includes_exc_info() -> None:
 
 
 def test_text_formatter_appends_extras_and_exc() -> None:
+    plain = logging.LogRecord(
+        name="audioforge.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="plain message",
+        args=(),
+        exc_info=None,
+    )
+    plain_text = TextFormatter().format(plain)
+    assert "plain message" in plain_text
+    assert " |" not in plain_text
+
     record = logging.LogRecord(
         name="audioforge.test",
         level=logging.INFO,
@@ -156,20 +175,30 @@ def test_configure_logging_idempotent_updates_level() -> None:
     assert len(root.handlers) == 1
 
 
-def test_configure_logging_force_replaces_handlers() -> None:
+def test_configure_logging_force_replaces_console_keeps_job_file(
+    tmp_path: Path,
+) -> None:
     stream_a = StringIO()
     stream_b = StringIO()
     configure_logging(level="INFO", fmt="text", stream=stream_a, force=True)
+    job_log = tmp_path / "job.log"
+    file_handler = attach_job_file_handler(
+        job_log, job_id="keep-me", fmt="text", level="INFO"
+    )
     configure_logging(level="INFO", fmt="text", stream=stream_b, force=True)
-    get_logger().info("only-b")
+    assert file_handler in logging.getLogger("audioforge").handlers
+    get_logger().info("only-b", extra={"job_id": "keep-me"})
     assert "only-b" not in stream_a.getvalue()
     assert "only-b" in stream_b.getvalue()
+    detach_handler(file_handler)
 
 
 def test_attach_and_detach_job_file_handler(tmp_path: Path) -> None:
     configure_logging(level="INFO", fmt="text", stream=StringIO(), force=True)
     job_log = tmp_path / "work" / "job-1" / "job.log"
-    handler = attach_job_file_handler(job_log, fmt="json", level="DEBUG")
+    handler = attach_job_file_handler(
+        job_log, job_id="job-1", fmt="json", level="DEBUG"
+    )
     get_logger("pipeline").info(
         "chapter ok",
         extra={"job_id": "job-1", "event": "chapter_end", "chapter_index": 1},
@@ -183,8 +212,70 @@ def test_attach_and_detach_job_file_handler(tmp_path: Path) -> None:
     assert payload["event"] == "chapter_end"
 
 
+def test_overlapping_job_logs_are_isolated(tmp_path: Path) -> None:
+    """Two concurrent attaches must not cross-contaminate job.log files."""
+    configure_logging(level="INFO", fmt="json", stream=StringIO(), force=True)
+    log_a = tmp_path / "a" / "job.log"
+    log_b = tmp_path / "b" / "job.log"
+    ha = attach_job_file_handler(log_a, job_id="job-a", fmt="json", level="DEBUG")
+    hb = attach_job_file_handler(log_b, job_id="job-b", fmt="json", level="DEBUG")
+    log = get_logger("pipeline")
+
+    with job_logging_context("job-a"):
+        log.info("from-a-context", extra={"event": "chapter_start"})
+    with job_logging_context("job-b"):
+        log.info("from-b-context", extra={"event": "chapter_start"})
+    # Explicit extra without context must still route correctly.
+    log.info("explicit-a", extra={"job_id": "job-a", "event": "chapter_end"})
+    log.info("explicit-b", extra={"job_id": "job-b", "event": "chapter_end"})
+    # Unrelated job_id must not land in either file.
+    log.info("noise", extra={"job_id": "other", "event": "noise"})
+
+    detach_handler(ha)
+    detach_handler(hb)
+
+    text_a = log_a.read_text(encoding="utf-8")
+    text_b = log_b.read_text(encoding="utf-8")
+    assert "from-a-context" in text_a
+    assert "explicit-a" in text_a
+    assert "from-b-context" not in text_a
+    assert "explicit-b" not in text_a
+    assert "noise" not in text_a
+
+    assert "from-b-context" in text_b
+    assert "explicit-b" in text_b
+    assert "from-a-context" not in text_b
+    assert "explicit-a" not in text_b
+    assert "noise" not in text_b
+
+    # Context-injected lines still carry job_id in JSON payload.
+    payloads_a = [json.loads(ln) for ln in text_a.strip().splitlines()]
+    assert all(p["job_id"] == "job-a" for p in payloads_a)
+
+
+def test_attach_rejects_empty_job_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="job_id"):
+        attach_job_file_handler(tmp_path / "j.log", job_id="  ")
+
+
+def test_job_logging_context_rejects_empty() -> None:
+    with pytest.raises(ValueError, match="job_id"), job_logging_context(""):
+        pass
+
+
 def test_get_logger_names() -> None:
     assert get_logger(None).name == "audioforge"
     assert get_logger("audioforge").name == "audioforge"
     assert get_logger("audioforge.pipeline.tts").name == "audioforge.pipeline.tts"
     assert get_logger("pipeline.tts").name == "audioforge.pipeline.tts"
+
+
+def test_settings_rejects_invalid_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIOFORGE_LOG_LEVEL", "DEGUG")
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+def test_settings_normalizes_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIOFORGE_LOG_LEVEL", "debug")
+    assert AppSettings().log_level == "DEBUG"

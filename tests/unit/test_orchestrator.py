@@ -100,7 +100,10 @@ def test_run_pipeline_e2e_completed(tmp_path: Path) -> None:
     job_paths = JobPaths.for_job(settings.work_dir, "e2e-job")
     assert job_paths.job_log.is_file()
     log_text = job_paths.job_log.read_text(encoding="utf-8")
-    assert "pipeline completed" in log_text or "stage start" in log_text
+    assert "pipeline completed" in log_text
+    assert "stage start" in log_text
+    assert "tts chapter" in log_text or "tts done chapter" in log_text
+    assert "job_id=e2e-job" in log_text
 
     # Persisted job.json matches completed state
     paths = JobPaths.for_job(settings.work_dir, "e2e-job")
@@ -416,6 +419,8 @@ def test_run_synthesize_no_chapters(tmp_path: Path) -> None:
     save_job(empty, paths.job_json)
     with pytest.raises(PipelineError, match="no chapters"):
         run_synthesize(settings, job_or_path=job_id, tts=FakeTtsBackend())
+    assert paths.job_log.is_file()
+    assert "synthesize aborted" in paths.job_log.read_text(encoding="utf-8")
 
 
 def test_run_package_no_chapters(tmp_path: Path) -> None:
@@ -434,6 +439,8 @@ def test_run_package_no_chapters(tmp_path: Path) -> None:
     save_job(empty, paths.job_json)
     with pytest.raises(PipelineError, match="no chapters"):
         run_package(settings, job_or_path=job_id, ffmpeg=FakeFfmpegRunner())
+    assert paths.job_log.is_file()
+    assert "package aborted" in paths.job_log.read_text(encoding="utf-8")
 
 
 def test_run_package_failure(tmp_path: Path) -> None:

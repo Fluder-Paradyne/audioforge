@@ -26,8 +26,11 @@ from pathlib import Path
 
 from audioforge.backends.protocols import FfmpegRunner
 from audioforge.io.paths import JobPaths
+from audioforge.logging_config import get_logger
 from audioforge.models import ArtifactManifest, ChapterRef
 from audioforge.pipeline.tts import audio_filename
+
+logger = get_logger(__name__)
 
 # Default book stem when *book_slug* is omitted.
 _DEFAULT_BOOK_SLUG = "audiobook"
@@ -85,6 +88,16 @@ def package_book(
         raise PackageError("book_slug must be non-empty")
 
     probe = duration_seconds if duration_seconds is not None else wav_duration_seconds
+    logger.info(
+        "package start (%s chapters) → %s.m4b",
+        len(chapters),
+        slug,
+        extra={
+            "stage": "package",
+            "event": "package_start",
+            "chapter_total": len(chapters),
+        },
+    )
 
     chapter_audio: list[Path] = []
     durations: list[float] = []
@@ -136,6 +149,14 @@ def package_book(
         "+faststart",
         str(m4b_path.resolve()),
     ]
+    logger.info(
+        "package invoking ffmpeg",
+        extra={
+            "stage": "package",
+            "event": "ffmpeg_start",
+            "chapter_total": len(chapters),
+        },
+    )
     try:
         ffmpeg.run(args)
     except PackageError:
@@ -146,6 +167,15 @@ def package_book(
     if not m4b_path.is_file():
         raise PackageError(f"FFmpeg did not produce M4B output: {m4b_path}")
 
+    logger.info(
+        "package complete → %s",
+        m4b_path.name,
+        extra={
+            "stage": "package",
+            "event": "package_end",
+            "chapter_total": len(chapters),
+        },
+    )
     return ArtifactManifest(chapter_audio=chapter_audio, m4b_path=m4b_path)
 
 

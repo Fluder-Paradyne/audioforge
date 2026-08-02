@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -457,26 +457,35 @@ def _job_file_logging(
     settings: AppSettings,
     job_id: str,
 ) -> Iterator[None]:
-    """Attach filtered ``job.log`` and bind job context for the entrypoint."""
+    """Attach filtered ``job.log`` and bind job context for the entrypoint.
+
+    Detach always runs in an outer ``finally`` so bookend log I/O failures
+    cannot leak ``FileHandler``s on long-lived API processes.
+    """
     handler = attach_job_file_handler(
         paths.job_log,
         job_id=job_id,
         fmt=settings.log_format,
         level=settings.log_level,
     )
-    with job_logging_context(job_id):
-        logger.info(
-            "job started",
-            extra={"job_id": job_id, "event": "job_start"},
-        )
-        try:
-            yield
-        finally:
-            logger.info(
-                "job log closed",
-                extra={"job_id": job_id, "event": "job_log_close"},
-            )
-            detach_handler(handler)
+    try:
+        with job_logging_context(job_id):
+            # Bookend logging must not prevent the pipeline or detach.
+            with suppress(Exception):
+                logger.info(
+                    "job started",
+                    extra={"job_id": job_id, "event": "job_start"},
+                )
+            try:
+                yield
+            finally:
+                with suppress(Exception):
+                    logger.info(
+                        "job log closed",
+                        extra={"job_id": job_id, "event": "job_log_close"},
+                    )
+    finally:
+        detach_handler(handler)
 
 
 def _enter_stage(

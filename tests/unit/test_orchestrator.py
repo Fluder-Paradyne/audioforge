@@ -168,6 +168,12 @@ def test_run_pipeline_fail_fast_broken_prep(tmp_path: Path) -> None:
     assert loaded.error is not None
     assert "prep deliberately broken" in loaded.error
 
+    assert paths.job_log.is_file()
+    log_text = paths.job_log.read_text(encoding="utf-8")
+    assert "pipeline failed" in log_text or "pipeline_failed" in log_text
+    assert "job_id=fail-job" in log_text
+    assert "prep deliberately broken" in log_text
+
 
 def test_run_pipeline_resume_skips_existing_work(tmp_path: Path) -> None:
     settings = _settings(tmp_path)

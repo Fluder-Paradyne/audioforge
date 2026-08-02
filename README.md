@@ -203,8 +203,10 @@ Settings are loaded via Pydantic Settings (`AppSettings`). Environment variables
 | `AUDIOFORGE_DEFAULT_PREP_MODEL` | Default Ollama model | `llama3.2:3b` |
 | `AUDIOFORGE_HOST` | API bind host | `127.0.0.1` |
 | `AUDIOFORGE_PORT` | API bind port | `8765` |
-| `AUDIOFORGE_LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, …) | `INFO` |
+| `AUDIOFORGE_LOG_LEVEL` | Console log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`) | `INFO` |
 | `AUDIOFORGE_LOG_FORMAT` | Console/job log format: `text` or `json` | `text` |
+
+`AUDIOFORGE_LOG_LEVEL` controls the **console** handler. The package logger stays at DEBUG so handlers can filter independently (e.g. a verbose `job.log` while console stays INFO). Invalid values like `NOTSET` or typos are rejected.
 
 For machine-readable logs (JSON Lines on stderr and in `job.log`):
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from audioforge.logging_config import normalize_log_level_name
 
 
 class AppSettings(BaseSettings):
@@ -31,11 +32,5 @@ class AppSettings(BaseSettings):
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:
-        """Reject typos like ``DEGUG``; store canonical uppercase names."""
-        name = value.strip().upper()
-        if name not in logging.getLevelNamesMapping():
-            raise ValueError(
-                f"Invalid log level {value!r}; "
-                "use DEBUG, INFO, WARNING, ERROR, or CRITICAL"
-            )
-        return name
+        """Allowlist DEBUG…CRITICAL; reject NOTSET and typos like ``DEGUG``."""
+        return normalize_log_level_name(value)

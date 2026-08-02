@@ -42,6 +42,11 @@ _STRUCTURED_KEYS: tuple[str, ...] = (
 _ROOT_LOGGER_NAME = "audioforge"
 _CONFIGURED_FLAG = "_audioforge_configured"
 
+# Operational levels accepted by settings / configure (not NOTSET/WARN aliases).
+ALLOWED_LOG_LEVELS: frozenset[str] = frozenset(
+    {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+)
+
 _current_job_id: ContextVar[str | None] = ContextVar(
     "audioforge_job_id",
     default=None,
@@ -119,19 +124,33 @@ def make_formatter(fmt: LogFormatName | str) -> logging.Formatter:
     return TextFormatter()
 
 
-def parse_log_level(level: str | int) -> int:
-    """Resolve a level name or int.
+def normalize_log_level_name(level: str) -> str:
+    """Return a canonical allowlisted level name (``DEBUG``…``CRITICAL``).
+
+    Accepts ``WARN`` as an alias for ``WARNING``.
 
     Raises:
-        ValueError: If *level* is a string that is not a known log level name.
+        ValueError: If *level* is not an operational log level name.
+    """
+    key = level.strip().upper()
+    if key == "WARN":
+        key = "WARNING"
+    if key not in ALLOWED_LOG_LEVELS:
+        raise ValueError(
+            f"Invalid log level {level!r}; use DEBUG, INFO, WARNING, ERROR, or CRITICAL"
+        )
+    return key
+
+
+def parse_log_level(level: str | int) -> int:
+    """Resolve a level name or int to a numeric logging level.
+
+    Raises:
+        ValueError: If *level* is a string that is not an allowlisted name.
     """
     if isinstance(level, int):
         return level
-    mapping = logging.getLevelNamesMapping()
-    key = level.strip().upper()
-    if key not in mapping:
-        raise ValueError(f"Invalid log level: {level!r}")
-    return mapping[key]
+    return logging.getLevelNamesMapping()[normalize_log_level_name(level)]
 
 
 def _is_console_handler(handler: logging.Handler) -> bool:
@@ -144,12 +163,16 @@ def _is_console_handler(handler: logging.Handler) -> bool:
     )
 
 
-def _ensure_package_logger_ready(level: int | None = None) -> logging.Logger:
-    """Return package logger; set level only if NOTSET (no permanent ratchet)."""
+def _ensure_package_logger_ready() -> logging.Logger:
+    """Return package logger with ``propagate=False`` and DEBUG gate.
+
+    Handlers apply their own levels (console may be INFO while a job file
+    is DEBUG). The package logger must stay at DEBUG so handler thresholds
+    are not overridden by a coarser logger level.
+    """
     logger = logging.getLogger(_ROOT_LOGGER_NAME)
     logger.propagate = False
-    if logger.level == logging.NOTSET:
-        logger.setLevel(level if level is not None else logging.INFO)
+    logger.setLevel(logging.DEBUG)
     return logger
 
 
@@ -165,6 +188,10 @@ def configure_logging(
     Idempotent unless *force* is true. Does not touch the root logger so
     third-party libraries (uvicorn, httpx) keep their own handlers.
 
+    The package logger is always set to DEBUG; *level* controls the
+    **console** handler only. Job file handlers may use a more verbose
+    level (e.g. DEBUG job.log with INFO console).
+
     Job :class:`~logging.FileHandler` instances are preserved so a force
     reconfigure mid-run does not orphan open ``job.log`` handlers.
 
@@ -174,7 +201,10 @@ def configure_logging(
     logger = logging.getLogger(_ROOT_LOGGER_NAME)
     resolved = parse_log_level(level)
     if getattr(logger, _CONFIGURED_FLAG, False) and not force:
-        logger.setLevel(resolved)
+        logger.setLevel(logging.DEBUG)
+        for handler in logger.handlers:
+            if _is_console_handler(handler):
+                handler.setLevel(resolved)
         return
 
     # Drop console handlers only; keep job FileHandlers.
@@ -183,11 +213,12 @@ def configure_logging(
             logger.removeHandler(handler)
             handler.close()
 
-    logger.setLevel(resolved)
+    # Logger gate is DEBUG; console handler enforces *level*.
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     console = logging.StreamHandler(stream if stream is not None else sys.stderr)
-    console.setLevel(logging.DEBUG)
+    console.setLevel(resolved)
     console.setFormatter(make_formatter(fmt))
     # Handler-level inject works for records from any child logger.
     console.addFilter(InjectJobIdFilter())
@@ -207,6 +238,9 @@ def attach_job_file_handler(
     Call :func:`detach_handler` when the job finishes so handlers do not
     accumulate across runs in long-lived processes (API server).
 
+    The package logger stays at DEBUG so *level* on this handler is
+    effective even when the console is configured at INFO.
+
     Records without matching ``job_id`` are filtered out (see
     :class:`JobIdFilter`). Prefer emitting inside :func:`job_logging_context`
     so :class:`InjectJobIdFilter` stamps the active job id automatically.
@@ -216,7 +250,7 @@ def attach_job_file_handler(
 
     job_log.parent.mkdir(parents=True, exist_ok=True)
     resolved = parse_log_level(level)
-    package_logger = _ensure_package_logger_ready(level=resolved)
+    package_logger = _ensure_package_logger_ready()
 
     handler = logging.FileHandler(job_log, mode="a", encoding="utf-8")
     handler.setLevel(resolved)

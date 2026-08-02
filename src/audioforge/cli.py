@@ -8,6 +8,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from audioforge import __version__
+from audioforge.doctor import format_doctor_report, run_doctor
 from audioforge.factory import create_default_backends
 from audioforge.jobstore import load_job
 from audioforge.logging_config import configure_logging
@@ -324,6 +325,30 @@ def status(
         done_audio = sum(1 for p in state.progress if p.audio_done)
         typer.echo(f"prep_done: {done_prep}/{len(state.progress)}")
         typer.echo(f"audio_done: {done_audio}/{len(state.progress)}")
+
+
+@app.command()
+def doctor(
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print full doctor report as JSON."),
+    ] = False,
+    fictionreaper_bin: Annotated[
+        str,
+        typer.Option(
+            "--fictionreaper-bin",
+            help="FictionReaper binary to look for on PATH.",
+        ),
+    ] = "fictionreaper",
+) -> None:
+    """Check local dependencies (FFmpeg, Kokoro, Ollama, work dir, …)."""
+    settings = AppSettings()
+    report = run_doctor(settings, fictionreaper_bin=fictionreaper_bin)
+    if json_output:
+        typer.echo(report.model_dump_json(indent=2))
+    else:
+        typer.echo(format_doctor_report(report), nl=False)
+    raise typer.Exit(code=0 if report.ok else 1)
 
 
 @app.command()

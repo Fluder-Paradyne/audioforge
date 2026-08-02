@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -82,7 +83,15 @@ def test_help() -> None:
     result = _runner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "AudioForge" in result.stdout or "audiobook" in result.stdout.lower()
-    for name in ("build", "prepare", "synthesize", "package", "status", "serve"):
+    for name in (
+        "build",
+        "prepare",
+        "synthesize",
+        "package",
+        "status",
+        "doctor",
+        "serve",
+    ):
         assert name in result.stdout
 
 
@@ -556,6 +565,86 @@ def test_status_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("AUDIOFORGE_WORK_DIR", str(tmp_path / "work"))
     result = _runner().invoke(app, ["status", "missing"])
     assert result.exit_code == 1
+
+
+# --- doctor ---
+
+
+def test_doctor_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from audioforge.doctor import CheckStatus, DoctorCheck, DoctorReport
+
+    monkeypatch.setenv("AUDIOFORGE_WORK_DIR", str(tmp_path / "work"))
+
+    def fake_doctor(settings: Any, **kwargs: Any) -> DoctorReport:
+        return DoctorReport(
+            version=__version__,
+            checks=[
+                DoctorCheck(
+                    name="python",
+                    status=CheckStatus.OK,
+                    message="ok",
+                    required=True,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("audioforge.cli.run_doctor", fake_doctor)
+    result = _runner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "audioforge doctor" in result.stdout
+    assert "ready" in result.stdout
+
+
+def test_doctor_failure_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from audioforge.doctor import CheckStatus, DoctorCheck, DoctorReport
+
+    monkeypatch.setenv("AUDIOFORGE_WORK_DIR", str(tmp_path / "work"))
+
+    def fake_doctor(settings: Any, **kwargs: Any) -> DoctorReport:
+        return DoctorReport(
+            version=__version__,
+            checks=[
+                DoctorCheck(
+                    name="ffmpeg",
+                    status=CheckStatus.FAIL,
+                    message="missing",
+                    required=True,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("audioforge.cli.run_doctor", fake_doctor)
+    result = _runner().invoke(app, ["doctor"])
+    assert result.exit_code == 1
+    assert "not ready" in result.stdout
+
+
+def test_doctor_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from audioforge.doctor import CheckStatus, DoctorCheck, DoctorReport
+
+    monkeypatch.setenv("AUDIOFORGE_WORK_DIR", str(tmp_path / "work"))
+
+    def fake_doctor(settings: Any, **kwargs: Any) -> DoctorReport:
+        return DoctorReport(
+            version=__version__,
+            checks=[
+                DoctorCheck(
+                    name="python",
+                    status=CheckStatus.OK,
+                    message="ok",
+                    required=True,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("audioforge.cli.run_doctor", fake_doctor)
+    result = _runner().invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["version"] == __version__
+    assert payload["checks"][0]["name"] == "python"
 
 
 # --- serve ---

@@ -794,7 +794,7 @@ def test_align_resume_reruns_when_audio_newer(tmp_path: Path) -> None:
     calls = {"n": 0}
 
     class CountingAlign(FakeAlignmentBackend):
-        def align(self, *a: object, **k: object) -> list[TimedCue]:  # type: ignore[override]
+        def align(self, *a: object, **k: object) -> list[TimedCue]:
             calls["n"] += 1
             return super().align(*a, **k)  # type: ignore[arg-type]
 

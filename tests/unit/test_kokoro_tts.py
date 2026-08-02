@@ -383,13 +383,13 @@ def test_extract_numpy_like_and_detach(tmp_path: Path) -> None:
         def cpu(self) -> Detachable:
             return self
 
-        def float(self) -> Detachable:
+        def float(self) -> Detachable:  # noqa: A003 — torch-like API
             return self
 
         def reshape(self, *a: object) -> Detachable:
             return self
 
-        def tolist(self) -> list[float]:
+        def tolist(self) -> list[Any]:
             return [0.25]
 
     assert list(_as_float_iterable(None)) == []

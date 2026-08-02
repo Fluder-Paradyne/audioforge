@@ -97,6 +97,11 @@ def test_run_pipeline_e2e_completed(tmp_path: Path) -> None:
         assert wav.is_file()
     assert len(ffmpeg.commands) == 1
 
+    job_paths = JobPaths.for_job(settings.work_dir, "e2e-job")
+    assert job_paths.job_log.is_file()
+    log_text = job_paths.job_log.read_text(encoding="utf-8")
+    assert "pipeline completed" in log_text or "stage start" in log_text
+
     # Persisted job.json matches completed state
     paths = JobPaths.for_job(settings.work_dir, "e2e-job")
     loaded = load_job(paths.job_json)

@@ -17,9 +17,12 @@ from audioforge.backends.protocols import (
 from audioforge.factory import create_default_backends
 from audioforge.io.paths import JobPaths
 from audioforge.jobstore import load_job
+from audioforge.logging_config import configure_logging, get_logger
 from audioforge.models import ArtifactManifest, BuildOptions, JobState, JobStatus
 from audioforge.pipeline.orchestrator import PipelineError, run_pipeline
 from audioforge.settings import AppSettings
+
+logger = get_logger(__name__)
 
 
 def create_app(
@@ -47,6 +50,14 @@ def create_app(
         :func:`~audioforge.factory.create_default_backends` at job start.
     """
     app_settings = settings if settings is not None else AppSettings()
+    configure_logging(
+        level=app_settings.log_level,
+        fmt=app_settings.log_format,
+    )
+    logger.info(
+        "API app created",
+        extra={"event": "api_start"},
+    )
 
     application = FastAPI(
         title="AudioForge",
@@ -125,6 +136,10 @@ def create_app(
         options = _options_from_request(body)
         assert options.job_id is not None  # set in _options_from_request
         job_id = options.job_id
+        logger.info(
+            "job accepted",
+            extra={"job_id": job_id, "event": "job_accepted"},
+        )
 
         if run_sync:
             state = _execute_pipeline(options)

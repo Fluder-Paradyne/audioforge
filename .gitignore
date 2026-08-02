@@ -12,5 +12,6 @@ build/
 *.egg-info/
 work/
 downloads/
+.worktrees/
 .DS_Store
 uv.lock.bak

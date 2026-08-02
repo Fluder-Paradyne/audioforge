@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,3 +23,5 @@ class AppSettings(BaseSettings):
     default_prep_model: str = "llama3.2:3b"
     host: str = "127.0.0.1"
     port: int = 8765
+    log_level: str = "INFO"
+    log_format: Literal["text", "json"] = "text"

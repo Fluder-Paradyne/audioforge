@@ -689,3 +689,42 @@ def test_detect_speech_with_trailing_audio(
     )
     regions = detect_speech_regions(wav, duration_s=10.0)
     assert regions == [(0.0, 2.0), (3.0, 10.0)]
+
+
+def test_align_prefers_kokoro_cues_sidecar(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import write_cues_sidecar
+
+    paths = JobPaths.for_job(tmp_path / "work", "kok").ensure()
+    chapters = [
+        ChapterRef(
+            index=1,
+            title="One",
+            source_path=paths.source / "0001-one.md",
+            slug="one",
+        ),
+    ]
+    prepared = paths.prepared / prepared_filename(chapters[0])
+    prepared.write_text("Hello world.", encoding="utf-8")
+    audio = paths.audio / audio_filename(chapters[0])
+    _write_silent_wav(audio, seconds=1.0)
+    write_cues_sidecar(
+        audio,
+        [
+            TimedCue(start_s=0.1, end_s=0.4, text="Hello"),
+            TimedCue(start_s=0.4, end_s=0.9, text="world"),
+        ],
+    )
+
+    class BoomAlign:
+        def align(self, *a: object, **k: object) -> list[TimedCue]:
+            raise AssertionError("fallback aligner should not run")
+
+    progress = align_chapters(
+        chapters=chapters,
+        paths=paths,
+        options=BuildOptions(source=".", resume=False),
+        backend=BoomAlign(),
+    )
+    assert progress[0].align_done is True
+    loaded = load_chapter_alignment(paths.aligned / alignment_filename(1, "one"))
+    assert [c.text for c in loaded.cues] == ["Hello", "world"]

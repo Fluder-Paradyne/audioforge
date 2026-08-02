@@ -258,3 +258,205 @@ def test_extract_audio_iterable_fallback() -> None:
 
     assert list(_extract_audio_chunk(IterableOnly())) == [0.1, 0.2]
     assert list(_extract_audio_chunk((0, 1, IterableOnly()))) == [0.1, 0.2]
+
+
+def test_engine_writes_cues_sidecar_from_result_tokens(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class FakePipeline:
+        def __init__(self, lang_code: str = "a") -> None:
+            del lang_code
+
+        def __call__(self, text: str, voice: str = "") -> Iterator[object]:
+            del text, voice
+            tokens = [
+                SimpleNamespace(text="Hello", start_ts=0.0, end_ts=0.25),
+                SimpleNamespace(text="world", start_ts=0.25, end_ts=0.45),
+                SimpleNamespace(text=".", start_ts=0.45, end_ts=0.5),
+            ]
+            # 0.5s at 24kHz = 12000 samples
+            audio = [0.0] * 12_000
+            yield SimpleNamespace(audio=audio, tokens=tokens)
+
+    engine = engine_from_kpipeline(FakePipeline, sample_rate=24_000)
+    out = tmp_path / "speech.wav"
+    engine("Hello world", "af_heart", out)
+    assert out.is_file()
+    from audioforge.backends.kokoro_tts import cues_sidecar_path, load_cues_sidecar
+
+    assert cues_sidecar_path(out).is_file()
+    cues = load_cues_sidecar(out)
+    assert cues is not None
+    assert len(cues) == 2  # punctuation-only "." dropped
+    assert cues[0].text == "Hello"
+    assert cues[0].start_s == 0.0
+    assert cues[1].text == "world"
+    assert cues[1].end_s == 0.45
+
+
+def test_load_cues_sidecar_missing(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import load_cues_sidecar
+
+    assert load_cues_sidecar(tmp_path / "no.wav") is None
+
+
+def test_load_cues_sidecar_empty_or_invalid(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import cues_sidecar_path, load_cues_sidecar
+
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"x")
+    side = cues_sidecar_path(wav)
+    side.write_text('{"cues": []}\n', encoding="utf-8")
+    assert load_cues_sidecar(wav) is None
+    side.write_text('"not-a-dict"\n', encoding="utf-8")
+    assert load_cues_sidecar(wav) is None
+
+
+def test_cues_skip_bad_tokens_and_zero_audio_offset(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class FakePipeline:
+        def __init__(self, lang_code: str = "a") -> None:
+            del lang_code
+
+        def __call__(self, text: str, voice: str = "") -> Iterator[object]:
+            del text, voice
+            # No audio samples, but tokens with inverted times / empty text
+            tokens = [
+                SimpleNamespace(text="", start_ts=0.0, end_ts=0.1),
+                SimpleNamespace(text="Hi", start_ts=None, end_ts=0.1),
+                SimpleNamespace(text="Ok", start_ts=0.5, end_ts=0.4),  # inverted
+            ]
+            yield SimpleNamespace(audio=[], tokens=tokens)
+            # second chunk with audio via output.audio
+            tokens2 = [SimpleNamespace(text="There", start_ts=0.0, end_ts=0.2)]
+            yield SimpleNamespace(
+                audio=None,
+                output=SimpleNamespace(audio=[0.0, 0.1]),
+                tokens=tokens2,
+            )
+
+    engine = engine_from_kpipeline(FakePipeline, sample_rate=2)
+    out = tmp_path / "x.wav"
+    engine("t", "v", out)
+    from audioforge.backends.kokoro_tts import load_cues_sidecar
+
+    cues = load_cues_sidecar(out)
+    assert cues is not None
+    # skip empty/missing; fix inverted; second chunk offsets
+    texts = [c.text for c in cues]
+    assert "Ok" in texts
+    assert "There" in texts
+
+
+def test_extract_numpy_like_and_detach(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import _as_float_iterable, _extract_audio_chunk
+
+    class Detachable:
+        def detach(self) -> Detachable:
+            return self
+
+        def cpu(self) -> Detachable:
+            return self
+
+        def float(self) -> Detachable:
+            return self
+
+        def reshape(self, *a: object) -> Detachable:
+            return self
+
+        def tolist(self) -> list[float]:
+            return [0.25]
+
+    assert list(_as_float_iterable(None)) == []
+    assert list(_as_float_iterable(Detachable())) == [0.25]
+
+    class WithNumpy:
+        def numpy(self) -> list[float]:
+            return [0.5, 0.6]
+
+    assert list(_as_float_iterable(WithNumpy())) == [0.5, 0.6]
+
+    class OutWrap:
+        def __init__(self) -> None:
+            self.audio = [0.1]
+            self.output = None
+
+    # audio attr preferred
+    assert list(_extract_audio_chunk(OutWrap())) == [0.1]
+
+    from types import SimpleNamespace
+
+    o = SimpleNamespace(audio=None, output=SimpleNamespace(audio=[0.2, 0.3]))
+    assert list(_extract_audio_chunk(o)) == [0.2, 0.3]
+
+
+def test_extract_audio_skips_string_audio_attr() -> None:
+    from types import SimpleNamespace
+
+    from audioforge.backends.kokoro_tts import _extract_audio_chunk
+
+    item2 = SimpleNamespace(audio="x", output=SimpleNamespace(audio=[0.0]))
+    assert list(_extract_audio_chunk(item2)) == [0.0]
+
+
+def test_as_float_iterable_generator() -> None:
+    from audioforge.backends.kokoro_tts import _as_float_iterable
+
+    def gen() -> Iterator[float]:
+        yield 0.1
+        yield 0.2
+
+    assert list(_as_float_iterable(gen())) == [0.1, 0.2]
+
+
+def test_offset_uses_token_end_when_no_audio_samples(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    class FakePipeline:
+        def __init__(self, lang_code: str = "a") -> None:
+            del lang_code
+
+        def __call__(self, text: str, voice: str = "") -> Iterator[object]:
+            del text, voice
+            yield SimpleNamespace(
+                audio=[],
+                tokens=[SimpleNamespace(text="A", start_ts=0.0, end_ts=0.3)],
+            )
+            yield SimpleNamespace(
+                audio=[0.0] * 100,
+                tokens=[SimpleNamespace(text="B", start_ts=0.0, end_ts=0.1)],
+            )
+
+    engine = engine_from_kpipeline(FakePipeline, sample_rate=100)
+    out = tmp_path / "o.wav"
+    engine("t", "v", out)
+    from audioforge.backends.kokoro_tts import load_cues_sidecar
+
+    cues = load_cues_sidecar(out)
+    assert cues is not None
+    assert cues[0].text == "A"
+    assert cues[1].start_s == 0.3  # offset advanced from previous cue end
+
+
+def test_as_float_iterable_numpy_list_and_reshape(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import _as_float_iterable
+
+    class N:
+        def numpy(self) -> list[float]:
+            return [1.0, 2.0]
+
+    assert list(_as_float_iterable(N())) == [1.0, 2.0]
+
+    class Arr:
+        def reshape(self, *a: object) -> Arr:
+            return self
+
+        def tolist(self) -> list[float]:
+            return [3.0]
+
+    class N2:
+        def numpy(self) -> Arr:
+            return Arr()
+
+    assert list(_as_float_iterable(N2())) == [3.0]

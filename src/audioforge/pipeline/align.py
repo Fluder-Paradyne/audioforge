@@ -7,6 +7,7 @@ from audioforge.backends.alignment import (
     load_chapter_alignment,
     save_chapter_alignment,
 )
+from audioforge.backends.kokoro_tts import load_cues_sidecar
 from audioforge.backends.protocols import AlignmentBackend
 from audioforge.io.paths import JobPaths
 from audioforge.logging_config import get_logger
@@ -34,6 +35,10 @@ def align_chapters(
     progress: list[ChapterProgress] | None = None,
 ) -> list[ChapterProgress]:
     """Align each chapter; write ``paths.aligned / NNNN-slug.json``.
+
+    Prefer Kokoro token-timing sidecars (``*.cues.json`` next to chapter WAV)
+    when present — those match the generated audio. Otherwise call *backend*
+    (proportional / silence-aware fallback).
 
     Resume: when *options.resume* is true, *options.force* is false, and the
     alignment file already exists, skip and mark ``align_done``.
@@ -84,7 +89,13 @@ def align_chapters(
                     "chapter_total": len(chapters),
                 },
             )
-            cues = backend.align(audio_path, text, options=options)
+            kokoro_cues = load_cues_sidecar(audio_path)
+            if kokoro_cues is not None:
+                cues = kokoro_cues
+                source = "kokoro"
+            else:
+                cues = backend.align(audio_path, text, options=options)
+                source = "fallback"
             save_chapter_alignment(
                 out,
                 ChapterAlignment(chapter_index=chapter.index, cues=cues),
@@ -92,9 +103,10 @@ def align_chapters(
             entry.align_done = True
             entry.error = None
             logger.info(
-                "align done chapter %s (%s cues)",
+                "align done chapter %s (%s cues, source=%s)",
                 chapter.index,
                 len(cues),
+                source,
                 extra={
                     "stage": "align",
                     "event": "chapter_end",

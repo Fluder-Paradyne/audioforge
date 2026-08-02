@@ -23,7 +23,7 @@ CLI and a small local FastAPI surface share the same disk-backed job pipeline (`
 - Single-voice TTS via optional Kokoro extra (`af_heart` default voice)
 - Chapter audio + chaptered M4B packaging (FFmpeg)
 - Resume-friendly on-disk jobs (`job.json`, `--resume` / `--force`)
-- CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `serve`
+- CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `doctor`, `serve`
 - Local FastAPI: `POST /jobs`, job status, artifacts, `/health`
 - 100% test coverage gate, `mypy --strict`, Ruff
 
@@ -75,6 +75,13 @@ uv sync --all-groups --extra tts
 ```
 
 ## Quick start
+
+### 0. Check your environment
+
+```bash
+audioforge doctor
+audioforge doctor --json
+```
 
 ### 1. From a local chapter folder
 
@@ -152,6 +159,7 @@ curl -s http://127.0.0.1:8765/health
 | `audioforge synthesize <job>` | TTS for an existing job |
 | `audioforge package <job>` | Chapter audio → chaptered M4B |
 | `audioforge status <job>` | Human summary; `--json` for full `job.json` |
+| `audioforge doctor` | Check FFmpeg, Kokoro, Ollama, work dir, FictionReaper |
 | `audioforge serve` | Start local HTTP API (uvicorn) |
 
 `<source>` is a local chapter directory or fiction URL.  
@@ -169,6 +177,17 @@ curl -s http://127.0.0.1:8765/health
 | `--force` / `--no-force` | Re-run stages even if artifacts exist | no-force |
 | `--fictionreaper-bin STR` | Path to FictionReaper binary | `fictionreaper` |
 | `--job-id STR` | Explicit job id under the work directory | auto |
+
+### `doctor` options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--json` | Print full report as JSON | off |
+| `--fictionreaper-bin STR` | Binary name/path to look up on `PATH` | `fictionreaper` |
+
+Exit code is `0` when all **required** checks pass (Python, work dir, FFmpeg, Kokoro unless `AUDIOFORGE_ALLOW_FAKE_TTS=1`). Ollama and FictionReaper are optional and only warn. JSON output includes an `ok` field with the same readiness rule.
+
+`doctor` may create `AUDIOFORGE_WORK_DIR` if missing (write probe) and performs a short HTTP GET to Ollama. Ollama being listed as OK means the model name appears in `/api/tags`; CLI builds still use rules prep unless Ollama is explicitly wired for the run.
 
 ### `serve` options
 

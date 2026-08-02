@@ -73,7 +73,12 @@ def proportional_cues(
     *,
     speech_regions: list[tuple[float, float]] | None = None,
 ) -> list[TimedCue]:
-    """Build phrase cues; optionally only within *speech_regions* (start, end)."""
+    """Build phrase cues; optionally only within *speech_regions* (start, end).
+
+    Guarantees every cue satisfies ``0 <= start_s < end_s <= duration``.
+    The per-cue minimum length is scaled so all phrases fit inside the
+    speech timeline (never forces ends past *duration_s*).
+    """
     phrases = split_phrases(text)
     duration = max(0.05, float(duration_s))
     if not phrases:
@@ -94,35 +99,48 @@ def proportional_cues(
 
     weights = [max(1, len(p)) for p in phrases]
     total_w = float(sum(weights))
+    n = len(phrases)
+    # Floor small enough that all phrases fit; last cue may use remainder.
+    min_len = min(0.05, speech_total / (n + 1))
 
     # Map each phrase to a span on the concatenated speech timeline, then to absolute.
     cues: list[TimedCue] = []
     speech_cursor = 0.0
     for i, (phrase, weight) in enumerate(zip(phrases, weights, strict=True)):
-        if i == len(phrases) - 1:
+        if i == n - 1:
             speech_end = speech_total
         else:
-            speech_end = min(
-                speech_total,
-                speech_cursor + speech_total * (weight / total_w),
-            )
-            speech_end = max(speech_cursor + 0.05, speech_end)
+            ideal = speech_cursor + speech_total * (weight / total_w)
+            remaining_after = n - 1 - i
+            max_end = speech_total - min_len * remaining_after
+            speech_end = min(max_end, max(speech_cursor + min_len, ideal))
+            speech_end = max(speech_cursor, min(speech_end, speech_total))
 
         abs_start = _speech_time_to_absolute(speech_cursor, regions, region_lens)
         abs_end = _speech_time_to_absolute(speech_end, regions, region_lens)
-        abs_end = max(abs_start + 0.05, min(abs_end, duration))
+        abs_start = max(0.0, min(abs_start, duration))
+        abs_end = max(abs_start, min(abs_end, duration))
+        if abs_end <= abs_start:
+            abs_end = min(duration, abs_start + max(min_len, 1e-3))
+        if abs_end <= abs_start:
+            abs_start = max(0.0, duration - max(min_len, 1e-3))
+            abs_end = duration
         text_line = " ".join(phrase.split()) or "…"
         cues.append(TimedCue(start_s=abs_start, end_s=abs_end, text=text_line))
         speech_cursor = speech_end
 
-    # Snap last cue to end of last speech region (or full duration).
-    last_end = regions[-1][1]
+    # Snap last cue to end of last speech region, still within duration.
+    last_end = min(duration, regions[-1][1])
     last = cues[-1]
-    cues[-1] = TimedCue(
-        start_s=last.start_s,
-        end_s=max(last.start_s + 0.05, last_end),
-        text=last.text,
-    )
+    start = min(last.start_s, last_end)
+    if last_end > start:
+        end = last_end
+    else:
+        end = min(duration, start + max(min_len, 1e-3))
+        if end <= start:
+            start = max(0.0, duration - max(min_len, 1e-3))
+            end = duration
+    cues[-1] = TimedCue(start_s=start, end_s=end, text=last.text)
     return cues
 
 

@@ -108,6 +108,34 @@ def test_offset_cues_clamp() -> None:
     assert out[0].end_s == 12.0
 
 
+def test_offset_cues_never_past_chapter_end() -> None:
+    """Min-duration must not push end past chapter_end_s."""
+    cues = [TimedCue(start_s=0.98, end_s=1.0, text="late")]
+    out = offset_cues(cues, chapter_start_s=10.0, chapter_end_s=11.0)
+    assert len(out) == 1
+    assert out[0].end_s <= 11.0
+    assert out[0].start_s < out[0].end_s
+    # Over-span relative times clamp into chapter without bleed.
+    over = offset_cues(
+        [TimedCue(start_s=1.5, end_s=2.0, text="over")],
+        chapter_start_s=0.0,
+        chapter_end_s=1.0,
+    )
+    assert len(over) == 1
+    assert over[0].end_s <= 1.0
+    assert over[0].start_s < over[0].end_s
+
+
+def test_proportional_cues_never_exceed_duration() -> None:
+    text = "A. B. C. D. E. F. G. H. I. J."
+    cues = proportional_cues(text, 0.1)
+    assert cues
+    assert all(c.start_s >= 0.0 for c in cues)
+    assert all(c.end_s <= 0.1 + 1e-9 for c in cues)
+    assert all(c.end_s > c.start_s for c in cues)
+    assert cues[-1].end_s == pytest.approx(0.1, abs=1e-6)
+
+
 def test_build_book_vtt_basic() -> None:
     chapters = [
         ChapterRef(index=1, title="One", source_path=Path("a.md"), slug="one"),
@@ -728,3 +756,57 @@ def test_align_prefers_kokoro_cues_sidecar(tmp_path: Path) -> None:
     assert progress[0].align_done is True
     loaded = load_chapter_alignment(paths.aligned / alignment_filename(1, "one"))
     assert [c.text for c in loaded.cues] == ["Hello", "world"]
+
+
+def test_align_resume_reruns_when_audio_newer(tmp_path: Path) -> None:
+    import os
+    import time
+
+    paths = JobPaths.for_job(tmp_path / "work", "stale").ensure()
+    chapters = [
+        ChapterRef(
+            index=1,
+            title="One",
+            source_path=paths.source / "0001-one.md",
+            slug="one",
+        ),
+    ]
+    prepared = paths.prepared / prepared_filename(chapters[0])
+    prepared.write_text("Hello world.", encoding="utf-8")
+    audio = paths.audio / audio_filename(chapters[0])
+    _write_silent_wav(audio, seconds=1.0)
+
+    progress = align_chapters(
+        chapters=chapters,
+        paths=paths,
+        options=BuildOptions(source=".", resume=False),
+        backend=FakeAlignmentBackend(),
+    )
+    out = paths.aligned / alignment_filename(1, "one")
+    assert out.is_file()
+    first_cues = load_chapter_alignment(out).cues
+
+    # Make audio newer than alignment (simulates re-TTS without re-align).
+    time.sleep(0.02)
+    _write_silent_wav(audio, seconds=2.0)
+    os.utime(audio, None)
+
+    calls = {"n": 0}
+
+    class CountingAlign(FakeAlignmentBackend):
+        def align(self, *a: object, **k: object) -> list[TimedCue]:  # type: ignore[override]
+            calls["n"] += 1
+            return super().align(*a, **k)  # type: ignore[arg-type]
+
+    progress2 = align_chapters(
+        chapters=chapters,
+        paths=paths,
+        options=BuildOptions(source=".", resume=True, force=False),
+        backend=CountingAlign(),
+        progress=progress,
+    )
+    assert progress2[0].align_done is True
+    assert calls["n"] == 1
+    second = load_chapter_alignment(out)
+    assert second.cues[-1].end_s == pytest.approx(2.0, abs=0.05)
+    assert second.cues != first_cues or second.cues[-1].end_s != first_cues[-1].end_s

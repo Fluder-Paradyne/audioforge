@@ -310,6 +310,30 @@ def test_load_cues_sidecar_empty_or_invalid(tmp_path: Path) -> None:
     assert load_cues_sidecar(wav) is None
     side.write_text('"not-a-dict"\n', encoding="utf-8")
     assert load_cues_sidecar(wav) is None
+    side.write_text("{not json", encoding="utf-8")
+    assert load_cues_sidecar(wav) is None
+    side.write_text(
+        '{"cues": [{"start_s": 1.0, "end_s": 0.5, "text": "bad"}]}\n',
+        encoding="utf-8",
+    )
+    assert load_cues_sidecar(wav) is None
+
+
+def test_write_cues_sidecar_empty_removes_stale(tmp_path: Path) -> None:
+    from audioforge.backends.kokoro_tts import (
+        cues_sidecar_path,
+        load_cues_sidecar,
+        write_cues_sidecar,
+    )
+    from audioforge.models import TimedCue
+
+    wav = tmp_path / "speech.wav"
+    wav.write_bytes(b"x")
+    write_cues_sidecar(wav, [TimedCue(start_s=0.0, end_s=1.0, text="OLD")])
+    assert load_cues_sidecar(wav) is not None
+    assert write_cues_sidecar(wav, []) is None
+    assert not cues_sidecar_path(wav).is_file()
+    assert load_cues_sidecar(wav) is None
 
 
 def test_cues_skip_bad_tokens_and_zero_audio_offset(tmp_path: Path) -> None:

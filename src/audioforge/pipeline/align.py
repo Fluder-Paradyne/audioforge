@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from audioforge.backends.alignment import (
     alignment_filename,
     load_chapter_alignment,
     save_chapter_alignment,
 )
-from audioforge.backends.kokoro_tts import load_cues_sidecar
+from audioforge.backends.kokoro_tts import cues_sidecar_path, load_cues_sidecar
 from audioforge.backends.protocols import AlignmentBackend
 from audioforge.io.paths import JobPaths
 from audioforge.logging_config import get_logger
@@ -26,6 +28,17 @@ class AlignStageError(Exception):
     """Raised when the align stage cannot process a chapter."""
 
 
+def _alignment_is_fresh(alignment_path: Path, audio_path: Path) -> bool:
+    """True when *alignment_path* is at least as new as audio and cues sidecar."""
+    if not alignment_path.is_file() or not audio_path.is_file():
+        return False
+    out_mtime = alignment_path.stat().st_mtime
+    if out_mtime < audio_path.stat().st_mtime:
+        return False
+    sidecar = cues_sidecar_path(audio_path)
+    return not (sidecar.is_file() and out_mtime < sidecar.stat().st_mtime)
+
+
 def align_chapters(
     *,
     chapters: list[ChapterRef],
@@ -41,7 +54,8 @@ def align_chapters(
     (proportional / silence-aware fallback).
 
     Resume: when *options.resume* is true, *options.force* is false, and the
-    alignment file already exists, skip and mark ``align_done``.
+    alignment file already exists and is at least as new as the chapter WAV
+    (and cues sidecar if present), skip and mark ``align_done``.
 
     Fail-fast: on the first error, record it and raise :class:`AlignStageError`.
     """
@@ -54,7 +68,11 @@ def align_chapters(
         audio_path = paths.audio / audio_filename(chapter)
         out = paths.aligned / alignment_filename(chapter.index, chapter.slug)
 
-        if options.resume and not options.force and out.is_file():
+        if (
+            options.resume
+            and not options.force
+            and _alignment_is_fresh(out, audio_path)
+        ):
             entry.align_done = True
             entry.error = None
             logger.info(

@@ -48,25 +48,42 @@ def cues_sidecar_path(audio_path: Path) -> Path:
 
 
 def write_cues_sidecar(audio_path: Path, cues: list[TimedCue]) -> Path | None:
-    """Write cues JSON next to *audio_path*; return path or None if empty."""
-    if not cues:
-        return None
+    """Write cues JSON next to *audio_path*; return path or None if empty.
+
+    When *cues* is empty, any existing sidecar is removed so align cannot
+    prefer stale timings from a previous synthesis.
+    """
     path = cues_sidecar_path(audio_path)
+    if not cues:
+        if path.is_file():
+            path.unlink()
+        return None
     payload = {"cues": [c.model_dump() for c in cues]}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
 
 def load_cues_sidecar(audio_path: Path) -> list[TimedCue] | None:
-    """Load cues from sidecar if present; else None."""
+    """Load cues from sidecar if present; else None.
+
+    Malformed JSON or invalid cue payloads return None so align can fall
+    back to the alignment backend.
+    """
     path = cues_sidecar_path(audio_path)
     if not path.is_file():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
     raw = data.get("cues") if isinstance(data, dict) else None
     if not isinstance(raw, list) or not raw:
         return None
-    return [TimedCue.model_validate(item) for item in raw]
+    try:
+        return [TimedCue.model_validate(item) for item in raw]
+    except (TypeError, ValueError):
+        # Pydantic ValidationError subclasses ValueError.
+        return None
 
 
 def write_pcm16_mono_wav(

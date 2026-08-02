@@ -28,17 +28,36 @@ def offset_cues(
     chapter_start_s: float,
     chapter_end_s: float,
 ) -> list[TimedCue]:
-    """Shift chapter-relative cues into absolute book time; clamp to chapter span."""
+    """Shift chapter-relative cues into absolute book time; clamp to chapter span.
+
+    Never emits ``end_s`` past *chapter_end_s*. Min duration (up to 0.05s) is
+    applied only when it still fits inside the chapter; otherwise the cue is
+    dropped if it would be empty after clamping.
+    """
     if chapter_end_s <= chapter_start_s:
         raise SubtitleError(
             f"Invalid chapter span: start={chapter_start_s} end={chapter_end_s}"
         )
+    span = chapter_end_s - chapter_start_s
+    min_len = min(0.05, span)
     out: list[TimedCue] = []
     for cue in cues:
-        start = chapter_start_s + cue.start_s
-        end = chapter_start_s + cue.end_s
+        start = chapter_start_s + float(cue.start_s)
+        end = chapter_start_s + float(cue.end_s)
         start = max(chapter_start_s, min(start, chapter_end_s))
-        end = max(start + 0.05, min(end, chapter_end_s))
+        end = max(chapter_start_s, min(end, chapter_end_s))
+        if end <= start:
+            # Degenerate after clamp: try a short cue ending at chapter end.
+            if min_len <= 0:
+                continue
+            end = chapter_end_s
+            start = end - min_len
+        elif end - start < min_len:
+            end = min(chapter_end_s, start + min_len)
+            if end - start < min_len:
+                start = max(chapter_start_s, end - min_len)
+        if end <= start:
+            continue
         text = " ".join(cue.text.split()) or "…"
         out.append(TimedCue(start_s=start, end_s=end, text=text))
     return out

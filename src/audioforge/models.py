@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _utc_now() -> datetime:
@@ -83,6 +83,12 @@ class TimedCue(BaseModel):
     start_s: float = Field(ge=0.0)
     end_s: float = Field(gt=0.0)
     text: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _end_after_start(self) -> TimedCue:
+        if self.end_s <= self.start_s:
+            raise ValueError("end_s must be greater than start_s")
+        return self
 
 
 class ChapterAlignment(BaseModel):

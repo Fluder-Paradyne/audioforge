@@ -16,6 +16,7 @@ from audioforge.models import (
     JobStage,
     JobState,
     JobStatus,
+    TimedCue,
 )
 
 
@@ -279,3 +280,12 @@ def test_artifact_manifest_with_paths() -> None:
     raw = manifest.model_dump_json()
     restored = ArtifactManifest.model_validate_json(raw)
     assert restored.m4b_path == Path("out/book.m4b")
+
+
+def test_timed_cue_requires_end_after_start() -> None:
+    cue = TimedCue(start_s=0.0, end_s=0.5, text="ok")
+    assert cue.end_s > cue.start_s
+    with pytest.raises(ValidationError):
+        TimedCue(start_s=1.0, end_s=0.5, text="bad")
+    with pytest.raises(ValidationError):
+        TimedCue(start_s=1.0, end_s=1.0, text="equal")

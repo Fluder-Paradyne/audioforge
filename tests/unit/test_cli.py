@@ -645,6 +645,7 @@ def test_doctor_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["version"] == __version__
     assert payload["checks"][0]["name"] == "python"
+    assert payload["ok"] is True
 
 
 # --- serve ---

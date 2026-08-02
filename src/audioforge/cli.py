@@ -341,7 +341,11 @@ def doctor(
         ),
     ] = "fictionreaper",
 ) -> None:
-    """Check local dependencies (FFmpeg, Kokoro, Ollama, work dir, …)."""
+    """Check local dependencies (FFmpeg, Kokoro, Ollama, work dir, …).
+
+    May create the work directory and briefly write a probe file. Contacts
+    Ollama at the configured base URL when probing optional LLM prep.
+    """
     settings = AppSettings()
     report = run_doctor(settings, fictionreaper_bin=fictionreaper_bin)
     if json_output:

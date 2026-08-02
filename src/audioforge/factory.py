@@ -25,7 +25,9 @@ from audioforge.pipeline.prep import select_prep_backend
 from audioforge.settings import AppSettings
 
 # Env flag: allow silent FakeTtsBackend when Kokoro is not installed.
-_ALLOW_FAKE_TTS_ENV = "AUDIOFORGE_ALLOW_FAKE_TTS"
+ALLOW_FAKE_TTS_ENV = "AUDIOFORGE_ALLOW_FAKE_TTS"
+# Back-compat alias for older imports (prefer :data:`ALLOW_FAKE_TTS_ENV`).
+_ALLOW_FAKE_TTS_ENV = ALLOW_FAKE_TTS_ENV
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,6 @@ def _select_tts_backend() -> TtsBackend:
     try:
         return KokoroTtsBackend()
     except KokoroNotInstalledError:
-        if os.environ.get(_ALLOW_FAKE_TTS_ENV) == "1":
+        if os.environ.get(ALLOW_FAKE_TTS_ENV) == "1":
             return FakeTtsBackend()
         raise

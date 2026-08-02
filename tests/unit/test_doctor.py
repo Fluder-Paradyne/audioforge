@@ -20,10 +20,11 @@ from audioforge.doctor import (
     _check_ollama,
     _check_python,
     _check_work_dir,
+    _ollama_model_listed,
     format_doctor_report,
     run_doctor,
 )
-from audioforge.factory import _ALLOW_FAKE_TTS_ENV
+from audioforge.factory import ALLOW_FAKE_TTS_ENV
 from audioforge.settings import AppSettings
 
 
@@ -36,6 +37,8 @@ def test_doctor_report_ok_when_no_required_fails() -> None:
         ],
     )
     assert report.ok is True
+    payload = json.loads(report.model_dump_json())
+    assert payload["ok"] is True
 
 
 def test_doctor_report_not_ok_on_required_fail() -> None:
@@ -46,6 +49,8 @@ def test_doctor_report_not_ok_on_required_fail() -> None:
         ],
     )
     assert report.ok is False
+    payload = json.loads(report.model_dump_json())
+    assert payload["ok"] is False
 
 
 def test_format_doctor_report_includes_overall() -> None:
@@ -125,8 +130,8 @@ def test_run_doctor_with_injected_probes(tmp_path: Path) -> None:
     )
     assert report.ok is True
     assert report.version == __version__
-    names = [c.name for c in report.checks]
-    assert names == [
+    by_name = {c.name: c for c in report.checks}
+    assert list(by_name) == [
         "audioforge",
         "python",
         "work_dir",
@@ -136,9 +141,9 @@ def test_run_doctor_with_injected_probes(tmp_path: Path) -> None:
         "fictionreaper",
         "defaults",
     ]
-    assert report.checks[5].message.endswith("llama3.2:3b") or "fr-bin" in [
-        c.message for c in report.checks
-    ]
+    assert "llama3.2:3b" in by_name["ollama"].message
+    assert by_name["fictionreaper"].message == "fr-bin"
+    assert by_name["ollama"].status is CheckStatus.WARN
 
 
 def test_check_python_ok() -> None:
@@ -252,7 +257,7 @@ def test_check_ffmpeg_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_check_kokoro_missing_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(_ALLOW_FAKE_TTS_ENV, raising=False)
+    monkeypatch.delenv(ALLOW_FAKE_TTS_ENV, raising=False)
 
     def boom(name: str) -> object:
         raise ImportError("no kokoro")
@@ -266,7 +271,7 @@ def test_check_kokoro_missing_fail(
 def test_check_kokoro_missing_warn_when_fake_allowed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(_ALLOW_FAKE_TTS_ENV, "1")
+    monkeypatch.setenv(ALLOW_FAKE_TTS_ENV, "1")
 
     def boom(name: str) -> object:
         raise ImportError("no kokoro")
@@ -345,7 +350,8 @@ def test_check_ollama_model_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("audioforge.doctor.httpx.Client", Client)
     check = _check_ollama("http://127.0.0.1:11434", "llama3.2:3b")
     assert check.status is CheckStatus.OK
-    assert "model available" in check.message
+    assert "listed models include" in check.message
+    assert "llama3.2:3b" in check.message
 
 
 def test_check_ollama_model_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,7 +377,7 @@ def test_check_ollama_model_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("audioforge.doctor.httpx.Client", Client)
     check = _check_ollama("http://127.0.0.1:11434", "llama3.2:3b")
     assert check.status is CheckStatus.WARN
-    assert "not found" in check.message
+    assert "not listed" in check.message
 
 
 def test_check_ollama_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,16 +510,15 @@ def test_check_ollama_models_not_a_list(monkeypatch: pytest.MonkeyPatch) -> None
     assert "no models listed" in check.message
 
 
-def test_check_ollama_base_name_match(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_ollama_wrong_tag_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``llama3.2:latest`` must not satisfy configured ``llama3.2:3b``."""
+
     class Resp:
         status_code = 200
 
         def json(self) -> dict[str, Any]:
-            # Base match path: prep llama3.2:3b, list has llama3.2:latest
             return {
-                "models": [
-                    {"name": f"extra-{i}:1"} for i in range(6)
-                ]
+                "models": [{"name": f"extra-{i}:1"} for i in range(6)]
                 + [{"name": "llama3.2:latest"}]
             }
 
@@ -532,7 +537,16 @@ def test_check_ollama_base_name_match(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("audioforge.doctor.httpx.Client", Client)
     check = _check_ollama("http://127.0.0.1:11434", "llama3.2:3b")
-    assert check.status is CheckStatus.OK
+    assert check.status is CheckStatus.WARN
+    assert "not listed" in check.message
+    assert "+2 more" in check.message
+
+
+def test_ollama_model_listed_exact_and_untagged_latest() -> None:
+    assert _ollama_model_listed(["llama3.2:3b"], "llama3.2:3b") is True
+    assert _ollama_model_listed(["llama3.2:latest"], "llama3.2:3b") is False
+    assert _ollama_model_listed(["llama3.2:latest"], "llama3.2") is True
+    assert _ollama_model_listed(["other:1"], "llama3.2") is False
 
 
 def test_check_fictionreaper_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -572,3 +586,4 @@ def test_doctor_report_json_roundtrip() -> None:
     payload = json.loads(report.model_dump_json())
     assert payload["version"] == "0.1.0"
     assert payload["checks"][0]["status"] == "ok"
+    assert payload["ok"] is True

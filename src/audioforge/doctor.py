@@ -3,6 +3,10 @@
 Probes local dependencies without starting a full pipeline build. Required
 checks (Python, work dir, FFmpeg, Kokoro unless fake TTS is allowed) gate the
 process exit code; optional tools (Ollama, FictionReaper) report as warnings.
+
+Side effects: the work-dir check may create ``AUDIOFORGE_WORK_DIR`` if missing
+and briefly writes a unique probe file to verify writability. The Ollama check
+performs a short HTTP GET to the configured base URL.
 """
 
 from __future__ import annotations
@@ -12,15 +16,17 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from enum import StrEnum
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from audioforge import __version__
-from audioforge.factory import _ALLOW_FAKE_TTS_ENV
+from audioforge.factory import ALLOW_FAKE_TTS_ENV
 from audioforge.settings import AppSettings
 
 # Default timeouts for external probes (keep doctor snappy).
@@ -56,6 +62,7 @@ class DoctorReport(BaseModel):
     version: str
     checks: list[DoctorCheck] = Field(default_factory=list)
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
         """True when no required check failed."""
@@ -155,13 +162,16 @@ def _check_python() -> DoctorCheck:
 
 
 def _check_work_dir(work_dir: Path) -> DoctorCheck:
+    """Ensure *work_dir* is writable (creates the directory if missing)."""
     path = Path(work_dir)
+    probe = path / f".audioforge_doctor_write_{uuid.uuid4().hex}"
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".audioforge_doctor_write_test"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
     except OSError as exc:
+        with suppress(OSError):
+            probe.unlink(missing_ok=True)
         return DoctorCheck(
             name="work_dir",
             status=CheckStatus.FAIL,
@@ -232,7 +242,7 @@ def _check_ffmpeg(ffmpeg_path: str) -> DoctorCheck:
 
 
 def _check_kokoro() -> DoctorCheck:
-    allow_fake = os.environ.get(_ALLOW_FAKE_TTS_ENV) == "1"
+    allow_fake = os.environ.get(ALLOW_FAKE_TTS_ENV) == "1"
     try:
         kokoro_mod = importlib.import_module("kokoro")
     except ImportError:
@@ -241,7 +251,7 @@ def _check_kokoro() -> DoctorCheck:
                 name="kokoro",
                 status=CheckStatus.WARN,
                 message=(
-                    f"not installed; {_ALLOW_FAKE_TTS_ENV}=1 will use silent fake TTS"
+                    f"not installed; {ALLOW_FAKE_TTS_ENV}=1 will use silent fake TTS"
                 ),
                 required=False,
                 hint="Install with: uv sync --extra tts (or tool install [tts]).",
@@ -253,7 +263,7 @@ def _check_kokoro() -> DoctorCheck:
             required=True,
             hint=(
                 "Install optional extra `tts`, or set "
-                f"{_ALLOW_FAKE_TTS_ENV}=1 for plumbing-only fake audio."
+                f"{ALLOW_FAKE_TTS_ENV}=1 for plumbing-only fake audio."
             ),
         )
 
@@ -268,9 +278,21 @@ def _check_kokoro() -> DoctorCheck:
     return DoctorCheck(
         name="kokoro",
         status=CheckStatus.OK,
-        message="package importable (KPipeline present)",
+        message="package importable (KPipeline present; weights not probed)",
         required=True,
     )
+
+
+def _ollama_model_listed(names: list[str], prep_model: str) -> bool:
+    """Return True only when *prep_model* is an exact listed Ollama model name.
+
+    Ollama resolves models by full ``name:tag``. Having ``llama3.2:latest`` does
+    **not** mean ``llama3.2:3b`` is installed. If *prep_model* has no tag, also
+    accept ``{prep_model}:latest`` (Ollama's default-tag convention).
+    """
+    if prep_model in names:
+        return True
+    return ":" not in prep_model and f"{prep_model}:latest" in names
 
 
 def _check_ollama(base_url: str, prep_model: str) -> DoctorCheck:
@@ -284,7 +306,10 @@ def _check_ollama(base_url: str, prep_model: str) -> DoctorCheck:
             status=CheckStatus.WARN,
             message=f"unreachable at {base_url} ({exc})",
             required=False,
-            hint="Start Ollama or rely on rules prep / --skip-prep.",
+            hint=(
+                "Start Ollama for LLM prep when the build path enables it; "
+                "rules prep / --skip-prep work without it."
+            ),
         )
 
     if response.status_code != 200:
@@ -293,7 +318,10 @@ def _check_ollama(base_url: str, prep_model: str) -> DoctorCheck:
             status=CheckStatus.WARN,
             message=f"HTTP {response.status_code} from {url}",
             required=False,
-            hint="Start Ollama or rely on rules prep / --skip-prep.",
+            hint=(
+                "Start Ollama for LLM prep when the build path enables it; "
+                "rules prep / --skip-prep work without it."
+            ),
         )
 
     try:
@@ -324,20 +352,14 @@ def _check_ollama(base_url: str, prep_model: str) -> DoctorCheck:
             hint=f"Pull a model: ollama pull {prep_model}",
         )
 
-    model_ok = any(
-        n == prep_model or n.startswith(f"{prep_model}:") or n.startswith(prep_model)
-        for n in names
-    )
-    # Also match when prep_model is "llama3.2:3b" and list has "llama3.2:3b"
-    if not model_ok:
-        base = prep_model.split(":")[0]
-        model_ok = any(n == base or n.startswith(f"{base}:") for n in names)
-
-    if model_ok:
+    if _ollama_model_listed(names, prep_model):
         return DoctorCheck(
             name="ollama",
             status=CheckStatus.OK,
-            message=f"reachable; model available for prep ({prep_model})",
+            message=(
+                f"reachable; listed models include {prep_model!r} "
+                "(LLM prep only if the build enables Ollama)"
+            ),
             required=False,
         )
     preview = ", ".join(names[:5])
@@ -346,7 +368,7 @@ def _check_ollama(base_url: str, prep_model: str) -> DoctorCheck:
         name="ollama",
         status=CheckStatus.WARN,
         message=(
-            f"reachable; default prep model {prep_model!r} not found "
+            f"reachable; configured model {prep_model!r} not listed "
             f"(have: {preview}{more})"
         ),
         required=False,

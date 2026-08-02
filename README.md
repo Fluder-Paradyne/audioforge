@@ -23,7 +23,7 @@ CLI and a small local FastAPI surface share the same disk-backed job pipeline (`
 - Single-voice TTS via optional Kokoro extra (`af_heart` default voice)
 - Chapter audio + chaptered M4B packaging (FFmpeg)
 - Resume-friendly on-disk jobs (`job.json`, `--resume` / `--force`)
-- CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `serve`
+- CLI: `build`, `prepare`, `synthesize`, `package`, `status`, `doctor`, `serve`
 - Local FastAPI: `POST /jobs`, job status, artifacts, `/health`
 - 100% test coverage gate, `mypy --strict`, Ruff
 
@@ -185,7 +185,9 @@ curl -s http://127.0.0.1:8765/health
 | `--json` | Print full report as JSON | off |
 | `--fictionreaper-bin STR` | Binary name/path to look up on `PATH` | `fictionreaper` |
 
-Exit code is `0` when all **required** checks pass (Python, work dir, FFmpeg, Kokoro unless `AUDIOFORGE_ALLOW_FAKE_TTS=1`). Ollama and FictionReaper are optional and only warn.
+Exit code is `0` when all **required** checks pass (Python, work dir, FFmpeg, Kokoro unless `AUDIOFORGE_ALLOW_FAKE_TTS=1`). Ollama and FictionReaper are optional and only warn. JSON output includes an `ok` field with the same readiness rule.
+
+`doctor` may create `AUDIOFORGE_WORK_DIR` if missing (write probe) and performs a short HTTP GET to Ollama. Ollama being listed as OK means the model name appears in `/api/tags`; CLI builds still use rules prep unless Ollama is explicitly wired for the run.
 
 ### `serve` options
 
